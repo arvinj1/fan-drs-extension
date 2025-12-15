@@ -35,7 +35,12 @@ function ensureButton() {
   if (!isWatchPage()) return;
   const videoId = getVideoIdFromUrl();
   if (!videoId) return;
+  
+  // Early exit if button already exists - prevent re-injection
   if (document.getElementById("fan-drs-btn")) return;
+  
+  // Only check cricket detection if we need to inject
+  if (!isLikelyCricketVideo()) return;
 
   const actions = findActionsBar();
   if (!actions) return;
@@ -46,19 +51,25 @@ function ensureButton() {
   btn.textContent = "Fan DRS Review";
   btn.style.cssText = `
     margin-left: 8px;
-    padding: 8px 10px;
+    padding: 0 16px;
+    height: 36px;
     border-radius: 18px;
-    border: 1px solid rgba(255,255,255,0.15);
-    background: rgba(30,30,40,0.9);
+    border: none;
+    background: rgba(255,255,255,0.1);
     color: #fff;
-    font: 600 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    font: 500 14px/36px Roboto, Arial, sans-serif;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    position: relative;
   `;
   btn.addEventListener("click", () => toggleSidebar(true));
   actions.appendChild(btn);
+  console.log('[Fan DRS] Button injected');
 }
 
 function ensureSidebar() {
+  if (!isLikelyCricketVideo()) return;
   if (document.getElementById("fan-drs-sidebar-host")) return;
 
   const host = document.createElement("div");
@@ -132,6 +143,34 @@ function ensureSidebar() {
       postToSidebar({ type: "KEYFRAMES_RESPONSE", payload: resp });
       return;
     }
+
+    if (ev.data.type === "SEEK_VIDEO") {
+      const { ts } = ev.data.payload || {};
+      if (ts != null) {
+        const video = getVideoEl();
+        if (video) {
+          video.currentTime = ts;
+          console.log(`[Fan DRS] Seeked to ${ts}s`);
+        }
+      }
+      return;
+    }
+
+    if (ev.data.type === "REQUEST_BUFFER_STATUS") {
+      const video = getVideoEl();
+      const currentTime = video?.currentTime ?? 0;
+      const recentFrames = FRAME_BUFFER.filter(f => f.ts >= currentTime - 20);
+      postToSidebar({
+        type: "BUFFER_STATUS",
+        payload: {
+          totalFrames: FRAME_BUFFER.length,
+          recentFrames: recentFrames.length,
+          capturing: captureRunning,
+          currentTime,
+        },
+      });
+      return;
+    }
   });
 }
 
@@ -156,6 +195,74 @@ function toggleSidebar(open) {
 
 function getVideoEl() {
   return document.querySelector("video.html5-main-video");
+}
+
+function getPageTitleText() {
+  const h1 = document.querySelector("h1.ytd-watch-metadata");
+  return (h1?.innerText || document.title || "").toLowerCase();
+}
+
+function isLikelyCricketVideo() {
+  // DEV OVERRIDE:
+  // Append &fan_drs=1 to the URL to force-enable on any video
+  const u = new URL(location.href);
+  if (u.searchParams.get("fan_drs") === "1") {
+    // Store preference for this video
+    const videoId = getVideoIdFromUrl();
+    if (videoId) {
+      sessionStorage.setItem(`fanDRS_force_${videoId}`, "1");
+      console.log('[Fan DRS] Force-enabled via URL parameter for', videoId);
+    }
+    return true;
+  }
+  
+  // Check stored preference
+  const videoId = getVideoIdFromUrl();
+  const forceEnabled = sessionStorage.getItem(`fanDRS_force_${videoId}`);
+  if (videoId && forceEnabled === "1") {
+    console.log('[Fan DRS] Force-enabled via stored preference for', videoId);
+    return true;
+  }
+
+  const text = (
+    getPageTitleText() +
+    " " +
+    (document.querySelector("#description")?.innerText || "")
+  ).toLowerCase();
+
+  // Cricket + dismissal-related tokens
+  const tokens = [
+    "cricket", "ipl", "t20", "odi", "test match",
+    "wicket", "lbw", "stumping", "caught", "edge", "nick",
+    "third umpire", "drs", "review", "ultraedge", "snicko", "hot spot",
+    "bowler", "batsman", "batter", "crease", "bails", "stumps",
+    "run out", "dismissal", "appeal"
+  ];
+
+  // Require at least TWO hits to reduce false positives
+  // EXCEPT for stumping-specific videos (stumping alone is highly specific)
+  let hits = 0;
+  const matched = [];
+  for (const tok of tokens) {
+    if (text.includes(tok)) {
+      hits++;
+      matched.push(tok);
+    }
+  }
+  
+  // Special case: "stumping" alone is specific enough
+  if (matched.includes("stumping") && hits >= 1) {
+    return true;
+  }
+  
+  if (hits >= 2) {
+    return true;
+  }
+  
+  if (hits > 0) {
+    console.log('[Fan DRS] Only', hits, 'cricket keyword found:', matched, '- need 2 to enable (or use &fan_drs=1)');
+  }
+  return false;
 }
 
 function getPlaybackContext() {
@@ -283,6 +390,19 @@ function getKeyframesForWindow(t0, t1, maxFrames = 60) {
   return { t0, t1, frames: sampled, quality };
 }
 
+// Auto-open sidebar if &fan_drs=1 in URL OR cricket detected
+function checkAutoOpen() {
+  const u = new URL(location.href);
+  const hasParam = u.searchParams.get("fan_drs") === "1";
+  
+  if (isLikelyCricketVideo()) {
+    setTimeout(() => {
+      toggleSidebar(true);
+      console.log('[Fan DRS] Auto-opened sidebar', hasParam ? 'via &fan_drs=1' : 'via cricket detection');
+    }, 1200);
+  }
+}
+
 // YouTube SPA navigation observer
 let lastUrl = location.href;
 const obs = new MutationObserver(() => {
@@ -299,4 +419,10 @@ const obs = new MutationObserver(() => {
 
 obs.observe(document.documentElement, { childList: true, subtree: true });
 
+// Multiple retry attempts for YouTube's dynamic loading
 setTimeout(() => ensureButton(), 800);
+setTimeout(() => ensureButton(), 2000);
+setTimeout(() => ensureButton(), 4000);
+
+// Auto-open check after sidebar is ready
+setTimeout(() => checkAutoOpen(), 1500);

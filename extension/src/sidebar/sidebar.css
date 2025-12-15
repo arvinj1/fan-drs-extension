@@ -56,8 +56,12 @@ body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; colo
 .meterFill{ height:100%; width:0%; background: rgba(45,224,167,0.55); }
 .meterValue{ margin-top:6px; font-size:11px; color: var(--muted); font-weight:800; }
 
-.timelineBar{ position:relative; height:12px; border-radius:999px; background: rgba(255,255,255,0.06); border:1px solid var(--border); }
-.marker{ position:absolute; top:-4px; width:2px; height:20px; background: rgba(255,204,0,0.85); }
+.timelineBar{ position:relative; height:32px; border-radius:8px; background: rgba(255,255,255,0.05); border:1px solid var(--border); overflow:visible; }
+.marker{ position:absolute; top:6px; width:4px; height:20px; background: rgba(255,204,0,0.85);
+  border-radius:2px; cursor:pointer; transition: all 0.15s ease; }
+.marker:hover{ transform: scaleY(1.3) scaleX(1.5); filter: brightness(1.3); z-index: 10; }
+.marker.selected{ height:26px; top:3px; filter: brightness(1.5) drop-shadow(0 0 8px currentColor); z-index: 11; }
+.bailOffMarker{ background: rgba(45,224,167,0.9); width:3px; }
 
 .drsGrid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .drsItem{ border:1px solid var(--border); background: rgba(0,0,0,0.14); padding:10px; border-radius:14px; }
@@ -70,6 +74,37 @@ body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; colo
 .badge{ width:44px; text-align:center; border-radius:12px; padding:8px 0;
   background: rgba(255,204,0,0.12); border:1px solid rgba(255,204,0,0.25); font-weight:900; }
 .challengeTitle{ font-weight:900; font-size:12px; }
-
+.select{
+  width: 100%;
+  padding: 10px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  color: #fff;
+  font-weight: 800;
+  font-size: 12px;
+  outline: none;
+}
 .bullets{ margin:0; padding-left:18px; color: var(--muted); font-size:12px; line-height:1.45; }
 .footer{ padding:10px 14px; border-top:1px solid var(--border); background: rgba(0,0,0,0.12); }
+
+.frameGrid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap:8px; max-height:320px; overflow-y:auto; margin-top:10px; }
+.frameThumb{ position:relative; aspect-ratio: 16/9; border:2px solid var(--border); border-radius:8px; overflow:hidden; cursor:pointer; transition: all 0.15s ease; }
+.frameThumb:hover{ border-color: rgba(124,92,255,0.5); transform: scale(1.05); }
+.frameThumb.selected{ border-color: rgba(45,224,167,0.8); border-width:3px; box-shadow: 0 0 12px rgba(45,224,167,0.4); }
+.frameThumb img{ width:100%; height:100%; object-fit:cover; display:block; }
+.frameThumb .frameTs{ position:absolute; bottom:2px; left:2px; right:2px; background:rgba(0,0,0,0.75); color:#fff; font-size:9px; font-weight:700; padding:2px 4px; border-radius:4px; text-align:center; }
+.frameThumb .checkmark{ position:absolute; top:4px; right:4px; width:20px; height:20px; background:rgba(45,224,167,0.95); border-radius:50%; display:none; align-items:center; justify-content:center; color:#fff; font-size:14px; font-weight:900; }
+.frameThumb.selected .checkmark{ display:flex; }
+
+/* Event detection hint card */
+.hint{ background: rgba(234,179,8,0.08); border-color: rgba(234,179,8,0.25); }
+.hintHeader{ display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.hintIcon{ font-size:18px; }
+.hintTitle{ font-weight:800; font-size:12px; flex:1; }
+.hintMessage{ font-size:12px; color: var(--muted); margin-bottom:10px; }
+.badge{ padding:4px 8px; border-radius:8px; font-size:10px; font-weight:900; }
+.badge.low{ background: rgba(156,163,175,0.15); border:1px solid rgba(156,163,175,0.3); color: #9ca3af; }
+.badge.med{ background: rgba(234,179,8,0.15); border:1px solid rgba(234,179,8,0.3); color: #eab308; }
+.badge.high{ background: rgba(34,197,94,0.15); border:1px solid rgba(34,197,94,0.3); color: #22c55e; }
+.btn.small{ padding:6px 8px; font-size:11px; }

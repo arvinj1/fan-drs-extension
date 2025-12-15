@@ -42,6 +42,22 @@
 
     <main class="main">
       <section class="panel active" id="panel-replay">
+        <!-- Event detection hint (wicket-break, edge, etc.) -->
+        <div class="card hint" id="eventHint" style="display: none;">
+          <div class="hintHeader">
+            <span class="hintIcon">💡</span>
+            <span class="hintTitle" id="hintTitle">Event detected</span>
+            <span class="badge" id="hintBadge">MED</span>
+          </div>
+          <div class="hintMessage" id="hintMessage">
+            Possible wicket-break at 12:34
+          </div>
+          <div class="inline">
+            <button class="btn small primary" id="btnUseHint">Use suggested window</button>
+            <button class="btn small ghost" id="btnDismissHint">Dismiss</button>
+          </div>
+        </div>
+
         <div class="verdictCard">
           <div class="verdictTop">
             <div>
@@ -77,10 +93,26 @@
         </div>
 
         <div class="card">
+        <div class="cardTitle">Review strictness</div>
+        <div class="inline">
+        <select id="modeSelect" class="select">
+          <option value="B" selected>Conservative (recommended)</option>
+          <option value="A">Ultra-Conservative</option>
+          <option value="C">Aggressive (more calls)</option>
+        </select>
+      </div>
+  <div class="small" id="modeHelp">
+    Default is Conservative: we only call OUT/NOT OUT when evidence is strong.
+  </div>
+</div>
+
+        <div class="card">
           <div class="cardTitle">Timeline</div>
           <div class="timeline">
-            <div class="timelineBar"><div class="marker" style="left:20%" title="Bounce"></div><div class="marker" style="left:55%" title="Impact"></div><div class="marker" style="left:72%" title="Bail off"></div></div>
-            <div class="timelineLegend small">Markers appear when detected or user-set.</div>
+            <div class="timelineBar" id="timelineBar">
+              <!-- Markers rendered dynamically by JavaScript -->
+            </div>
+            <div class="timelineLegend small">Click markers to seek. <span id="timelineLegendEvents">No events yet.</span></div>
           </div>
         </div>
       </section>
@@ -94,6 +126,7 @@
             <div class="drsItem"><div class="k">Wickets</div><div class="v" id="drsWickets">—</div></div>
             <div class="drsItem"><div class="k">Official</div><div class="v" id="drsOfficial">—</div></div>
           </div>
+
           <div class="small">If broadcast DRS overlays are detected, we’ll show them here.</div>
         </div>
       </section>
@@ -111,9 +144,9 @@
               <button class="btn" disabled>Coming soon</button>
             </div>
             <div class="challengeRow">
-              <div class="badge">+10</div>
+              <div class="badge">+15</div>
               <div><div class="challengeTitle">Pick bail-off frame</div><div class="small">Select the exact frame the bail leaves.</div></div>
-              <button class="btn" disabled>Coming soon</button>
+              <button class="btn" id="btnPickBailOff">Pick frame</button>
             </div>
             <div class="challengeRow">
               <div class="badge">+15</div>
@@ -121,6 +154,17 @@
               <button class="btn" disabled>Coming soon</button>
             </div>
           </div>
+        </div>
+
+        <div class="card" id="bailOffPicker" style="display:none;">
+          <div class="cardTitle">Select bail-off frame</div>
+          <div class="small" id="pickerStatus">Click the frame where the bail leaves the stumps.</div>
+          <div id="frameGrid" class="frameGrid"></div>
+          <div class="inline" style="margin-top:10px;">
+            <button class="btn ghost" id="btnClearBailOff">Clear selection</button>
+            <button class="btn ghost" id="btnClosePicker">Close</button>
+          </div>
+          <div class="small" id="selectionInfo" style="margin-top:8px;"></div>
         </div>
       </section>
 
@@ -147,9 +191,9 @@
       </section>
     </main>
 
-    <footer class="footer small">v0.1.1 • Client-first analysis • Optional “Accuracy Boost” later</footer>
+  <footer class="footer small">v0.1.1 • Client-first analysis • Optional "Accuracy Boost" later</footer>
   </div>
 
-  <script src="sidebar.js"></script>
+  <script type="module" src="sidebar.js"></script>
 </body>
 </html>
