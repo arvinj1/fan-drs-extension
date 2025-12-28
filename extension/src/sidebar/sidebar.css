@@ -108,3 +108,13 @@ body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; colo
 .badge.med{ background: rgba(234,179,8,0.15); border:1px solid rgba(234,179,8,0.3); color: #eab308; }
 .badge.high{ background: rgba(34,197,94,0.15); border:1px solid rgba(34,197,94,0.3); color: #22c55e; }
 .btn.small{ padding:6px 8px; font-size:11px; }
+/* Debug panel */
+details.card summary{ padding:12px; margin:-12px; }
+.debugGroup{ margin-bottom:16px; padding:12px; background: rgba(0,0,0,0.15); border-radius:8px; }
+.debugLabel{ font-size:11px; font-weight:700; color: var(--accent); margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px; }
+.debugSlider{ margin-bottom:8px; }
+.debugSlider label{ display:block; font-size:11px; color: var(--muted); margin-bottom:4px; }
+.debugSlider input[type="range"]{ width:100%; height:6px; border-radius:3px; background: rgba(255,255,255,0.1); outline:none; appearance:none; -webkit-appearance:none; }
+.debugSlider input[type="range"]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; height:14px; border-radius:7px; background: var(--accent); cursor:pointer; }
+.debugSlider input[type="range"]::-moz-range-thumb{ width:14px; height:14px; border-radius:7px; background: var(--accent); cursor:pointer; border:0; }
+#debugCanvas{ display:block; max-width:100%; height:auto; background: #000; }

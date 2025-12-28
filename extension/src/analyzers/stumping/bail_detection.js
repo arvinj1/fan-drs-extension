@@ -8,7 +8,7 @@
  * Detect bail-off moment from keyframes using lightweight CV heuristics
  * @param {Array} frames - Array of {ts, jpeg} keyframe objects
  * @param {Object} options - Detection options
- * @returns {Object|null} - {bailOffTs, confidence, method} or null if not detected
+ * @returns {Object|null} - {bailOffTs, confidence, method, roiUsed, artifacts} or null
  */
 export async function detectBailOff(frames, options = {}) {
   if (!frames || frames.length < 10) {
@@ -28,12 +28,16 @@ export async function detectBailOff(frames, options = {}) {
     // Try each ROI and pick the one with strongest signal
     let bestDetection = null;
     let bestScore = 0;
+    const allDetections = []; // For debug
     
     for (const roi of roiCandidates) {
       const detection = detectInROI(imageDataFrames, frames, roi, options);
-      if (detection && detection.score > bestScore) {
-        bestScore = detection.score;
-        bestDetection = detection;
+      if (detection) {
+        allDetections.push({ ...detection, roi });
+        if (detection.score > bestScore) {
+          bestScore = detection.score;
+          bestDetection = detection;
+        }
       }
     }
     
@@ -41,12 +45,25 @@ export async function detectBailOff(frames, options = {}) {
     const confidenceThreshold = options.minConfidence || 0.65;
     
     if (bestDetection && bestDetection.confidence >= confidenceThreshold) {
-      return {
+      const result = {
         bailOffTs: bestDetection.ts,
         confidence: bestDetection.confidence,
         method: 'frame_diff_roi',
         roiUsed: bestDetection.roiName,
+        frameIndex: bestDetection.frameIndex,
       };
+      
+      // Add debug artifacts if requested
+      if (options.debugMode) {
+        result.artifacts = {
+          deltaMasks: bestDetection.deltaMasks,
+          deltas: bestDetection.deltas,
+          roi: bestDetection.roi,
+          allDetections,
+        };
+      }
+      
+      return result;
     }
     
     return null;
@@ -102,6 +119,7 @@ function jpegToImageData(dataUrl) {
 
 /**
  * Detect bail-off in a specific ROI
+ * Returns detection with debug artifacts
  */
 function detectInROI(imageDataFrames, originalFrames, roi, options) {
   if (imageDataFrames.length < 3) return null;
@@ -120,6 +138,8 @@ function detectInROI(imageDataFrames, originalFrames, roi, options) {
   
   // Compute inter-frame deltas (mean absolute difference)
   const deltas = [];
+  const deltaMasks = []; // For visualization
+  
   for (let i = 1; i < roiFrames.length; i++) {
     const delta = computeFrameDelta(roiFrames[i - 1].data, roiFrames[i].data);
     deltas.push({
@@ -127,6 +147,12 @@ function detectInROI(imageDataFrames, originalFrames, roi, options) {
       delta,
       index: i,
     });
+    
+    // Create delta mask for debug visualization
+    if (options.debugMode) {
+      const mask = createDeltaMask(roiFrames[i - 1].data, roiFrames[i].data);
+      deltaMasks.push({ ts: roiFrames[i].ts, mask });
+    }
   }
   
   if (deltas.length === 0) return null;
@@ -174,6 +200,10 @@ function detectInROI(imageDataFrames, originalFrames, roi, options) {
     confidence: Math.max(0, Math.min(1, confidence)),
     score: candidateSpike.delta,
     roiName: roi.name,
+    frameIndex: candidateSpike.index,
+    deltaMasks: options.debugMode ? deltaMasks : undefined,
+    deltas,
+    roi,
   };
 }
 
@@ -285,4 +315,138 @@ function computeMAD(arr, median) {
   if (arr.length === 0) return 0;
   const deviations = arr.map(x => Math.abs(x - median));
   return computeMedian(deviations);
+}
+/**
+ * Create delta mask (heat map) for visualization
+ * Shows per-pixel difference between two frames
+ */
+function createDeltaMask(imageData1, imageData2) {
+  const { width, height } = imageData1;
+  const data1 = imageData1.data;
+  const data2 = imageData2.data;
+  const maskData = new Uint8ClampedArray(width * height * 4);
+  
+  for (let i = 0; i < data1.length; i += 4) {
+    const r1 = data1[i];
+    const g1 = data1[i + 1];
+    const b1 = data1[i + 2];
+    
+    const r2 = data2[i];
+    const g2 = data2[i + 1];
+    const b2 = data2[i + 2];
+    
+    // Compute per-pixel delta
+    const delta = (Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2)) / 3;
+    
+    // Map to heat color (blue = low, red = high)
+    if (delta < 30) {
+      // Blue (minimal change)
+      maskData[i] = 0;
+      maskData[i + 1] = 0;
+      maskData[i + 2] = 100 + delta * 2;
+    } else if (delta < 60) {
+      // Yellow (moderate change)
+      maskData[i] = 100 + (delta - 30) * 5;
+      maskData[i + 1] = 100 + (delta - 30) * 5;
+      maskData[i + 2] = 0;
+    } else {
+      // Red (high change)
+      maskData[i] = 255;
+      maskData[i + 1] = Math.max(0, 255 - (delta - 60) * 2);
+      maskData[i + 2] = 0;
+    }
+    maskData[i + 3] = 255;
+  }
+  
+  return new ImageData(maskData, width, height);
+}
+
+/**
+ * Create debug visualization for bail-off detection
+ * Shows: Delta timeline + spike frame + heat map
+ */
+export function createBailOffDebugVisualization(artifacts, frameIndex) {
+  if (!artifacts || !artifacts.deltaMasks) return null;
+  
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  
+  // Layout: Delta graph (top) + Heat map (bottom)
+  const graphHeight = 150;
+  const maskWidth = artifacts.deltaMasks[0].mask.width * 4; // Scale up 4x
+  const maskHeight = artifacts.deltaMasks[0].mask.height * 4;
+  
+  canvas.width = Math.max(800, maskWidth);
+  canvas.height = graphHeight + maskHeight + 40;
+  
+  // Fill background
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  
+  // Draw delta timeline
+  ctx.strokeStyle = '#4ade80';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  
+  const deltas = artifacts.deltas;
+  const maxDelta = Math.max(...deltas.map(d => d.delta));
+  const xStep = (canvas.width - 40) / deltas.length;
+  
+  deltas.forEach((d, i) => {
+    const x = 20 + i * xStep;
+    const y = graphHeight - 20 - (d.delta / maxDelta) * (graphHeight - 40);
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+    
+    // Highlight spike frame
+    if (d.index === frameIndex) {
+      ctx.save();
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  });
+  ctx.stroke();
+  
+  // Labels
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px monospace';
+  ctx.fillText('Frame Delta Timeline (spike = bail-off)', 20, 20);
+  ctx.fillText(`Max: ${maxDelta.toFixed(3)}`, canvas.width - 120, 20);
+  
+  // Draw delta mask (heat map) for spike frame
+  const spikeFrameDelta = artifacts.deltaMasks.find(dm => 
+    deltas.findIndex(d => d.ts === dm.ts) + 1 === frameIndex
+  );
+  
+  if (spikeFrameDelta) {
+    ctx.fillText('Bail-off frame heat map:', 20, graphHeight + 25);
+    
+    // Scale up mask 4x
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = spikeFrameDelta.mask.width;
+    tempCanvas.height = spikeFrameDelta.mask.height;
+    const tempCtx = tempCanvas.getContext('2d');
+    tempCtx.putImageData(spikeFrameDelta.mask, 0, 0);
+    
+    ctx.drawImage(tempCanvas, 20, graphHeight + 35, maskWidth, maskHeight);
+    
+    // Draw ROI box
+    if (artifacts.roi) {
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(20, graphHeight + 35, maskWidth, maskHeight);
+      ctx.fillStyle = '#fbbf24';
+      ctx.font = '10px monospace';
+      ctx.fillText(artifacts.roi.name.toUpperCase() + ' ROI', 25, graphHeight + 50);
+    }
+  }
+  
+  return canvas;
 }

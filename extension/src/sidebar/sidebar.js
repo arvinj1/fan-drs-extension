@@ -61,6 +61,7 @@ function updateModeHelp() {
   if (state.mode === "A") help.textContent = "Ultra-Conservative: only calls OUT/NOT OUT with extremely strong evidence.";
   if (state.mode === "B") help.textContent = "Conservative (recommended): calls OUT/NOT OUT only when evidence is strong.";
   if (state.mode === "C") help.textContent = "Aggressive: makes more calls, but higher chance of being wrong on close decisions.";
+  if (state.mode === "D") help.textContent = "Experimental: makes calls with early/incomplete detection. Use for testing only.";
 }
 function $(id){ return document.getElementById(id); }
 
@@ -870,9 +871,97 @@ function switchDismissal(dismissalId) {
   }
 }
 
+// Debug panel controls
+const debugConfig = {
+  enabled: false, // Master toggle for debug mode
+  edgeLowThreshold: 50,
+  edgeHighThreshold: 150,
+  houghThreshold: 30,
+  minLineLength: 100,
+  stumpAngleTolerance: 10,
+  stumpMinLength: 40,
+  bailSpikeThreshold: 8,
+  bailCutThreshold: 0.35,
+};
+
+function initDebugControls() {
+  // Wire up sliders
+  const sliders = [
+    'edgeLowThreshold', 'edgeHighThreshold', 'houghThreshold', 'minLineLength',
+    'stumpAngleTolerance', 'stumpMinLength', 'bailSpikeThreshold', 'bailCutThreshold'
+  ];
+  
+  sliders.forEach(id => {
+    const slider = document.getElementById(id);
+    const valueEl = document.getElementById(id + 'Value');
+    if (slider && valueEl) {
+      slider.addEventListener('input', (e) => {
+        const value = id.includes('Cut') || id.includes('Spike') && id !== 'bailSpikeThreshold'
+          ? parseFloat(e.target.value) 
+          : parseInt(e.target.value);
+        debugConfig[id] = value;
+        valueEl.textContent = e.target.value;
+        console.log('[Fan DRS Debug]', id, '=', e.target.value);
+      });
+    }
+  });
+  
+  // Enable debug mode when panel is opened
+  const debugPanel = document.getElementById('debugPanel');
+  if (debugPanel) {
+    debugPanel.addEventListener('toggle', (e) => {
+      debugConfig.enabled = e.target.open;
+      console.log('[Fan DRS Debug] Mode', debugConfig.enabled ? 'ENABLED' : 'DISABLED');
+    });
+  }
+  
+  // Reset button
+  document.getElementById('btnResetDebug')?.addEventListener('click', () => {
+    debugConfig.edgeLowThreshold = 50;
+    debugConfig.edgeHighThreshold = 150;
+    debugConfig.houghThreshold = 30;
+    debugConfig.minLineLength = 100;
+    debugConfig.stumpAngleTolerance = 10;
+    debugConfig.stumpMinLength = 40;
+    debugConfig.bailSpikeThreshold = 8;
+    debugConfig.bailCutThreshold = 0.35;
+    
+    document.getElementById('edgeLowThreshold').value = 50;
+    document.getElementById('edgeLowValue').textContent = '50';
+    document.getElementById('edgeHighThreshold').value = 150;
+    document.getElementById('edgeHighValue').textContent = '150';
+    document.getElementById('houghThreshold').value = 30;
+    document.getElementById('houghThresholdValue').textContent = '30';
+    document.getElementById('minLineLength').value = 100;
+    document.getElementById('minLineLengthValue').textContent = '100';
+    document.getElementById('stumpAngleTolerance').value = 10;
+    document.getElementById('stumpAngleValue').textContent = '10';
+    document.getElementById('stumpMinLength').value = 40;
+    document.getElementById('stumpMinLengthValue').textContent = '40';
+    document.getElementById('bailSpikeThreshold').value = 8;
+    document.getElementById('bailSpikeValue').textContent = '8';
+    document.getElementById('bailCutThreshold').value = 0.35;
+    document.getElementById('bailCutValue').textContent = '0.35';
+    
+    console.log('[Fan DRS Debug] Reset to defaults');
+  });
+  
+  // Visualization button (future enhancement)
+  document.getElementById('btnShowVisualization')?.addEventListener('click', () => {
+    const viz = document.getElementById('debugVisualization');
+    if (viz) {
+      viz.style.display = viz.style.display === 'none' ? 'block' : 'none';
+    }
+  });
+}
+
+// Export debug config for use in analyzers
+window.fanDRSDebugConfig = debugConfig;
+
 requestContext();
 setVerdict("—", 0, "WAITING");
 loadMode();
+initDebugControls();
 
 // Poll for buffer status every 500ms
 function requestBufferStatus() {

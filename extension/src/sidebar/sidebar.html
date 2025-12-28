@@ -99,6 +99,7 @@
           <option value="B" selected>Conservative (recommended)</option>
           <option value="A">Ultra-Conservative</option>
           <option value="C">Aggressive (more calls)</option>
+          <option value="D">Experimental (early detection)</option>
         </select>
       </div>
   <div class="small" id="modeHelp">
@@ -166,6 +167,73 @@
           </div>
           <div class="small" id="selectionInfo" style="margin-top:8px;"></div>
         </div>
+
+        <!-- Debug Panel (Collapsible) -->
+        <details class="card" id="debugPanel" style="margin-top: 10px;">
+          <summary class="cardTitle" style="cursor: pointer; user-select: none;">
+            🔧 Debug Controls (Advanced)
+          </summary>
+          <div class="small" style="margin-bottom: 12px;">
+            Adjust detection thresholds in real-time. Use for fine-tuning on difficult videos.
+          </div>
+          
+          <div class="debugGroup">
+            <div class="debugLabel">Crease Edge Detection</div>
+            <div class="debugSlider">
+              <label>Low Threshold: <span id="edgeLowValue">50</span></label>
+              <input type="range" id="edgeLowThreshold" min="10" max="100" value="50" step="5">
+            </div>
+            <div class="debugSlider">
+              <label>High Threshold: <span id="edgeHighValue">150</span></label>
+              <input type="range" id="edgeHighThreshold" min="50" max="255" value="150" step="10">
+            </div>
+          </div>
+          
+          <div class="debugGroup">
+            <div class="debugLabel">Crease Line Detection</div>
+            <div class="debugSlider">
+              <label>Hough Threshold: <span id="houghThresholdValue">30</span></label>
+              <input type="range" id="houghThreshold" min="10" max="100" value="30" step="5">
+            </div>
+            <div class="debugSlider">
+              <label>Min Line Length: <span id="minLineLengthValue">100</span></label>
+              <input type="range" id="minLineLength" min="50" max="200" value="100" step="10">
+            </div>
+          </div>
+          
+          <div class="debugGroup">
+            <div class="debugLabel">Stump Detection</div>
+            <div class="debugSlider">
+              <label>Angle Tolerance: <span id="stumpAngleValue">10</span>°</label>
+              <input type="range" id="stumpAngleTolerance" min="5" max="20" value="10" step="1">
+            </div>
+            <div class="debugSlider">
+              <label>Min Line Length: <span id="stumpMinLengthValue">40</span>px</label>
+              <input type="range" id="stumpMinLength" min="20" max="80" value="40" step="5">
+            </div>
+          </div>
+          
+          <div class="debugGroup">
+            <div class="debugLabel">Bail-off Detection</div>
+            <div class="debugSlider">
+              <label>Spike Threshold (k): <span id="bailSpikeValue">8</span></label>
+              <input type="range" id="bailSpikeThreshold" min="5" max="12" value="8" step="0.5">
+            </div>
+            <div class="debugSlider">
+              <label>Cut Guard Threshold: <span id="bailCutValue">0.35</span></label>
+              <input type="range" id="bailCutThreshold" min="0.2" max="0.6" value="0.35" step="0.05">
+            </div>
+          </div>
+          
+          <div class="inline" style="margin-top: 12px;">
+            <button class="btn small" id="btnResetDebug">Reset to defaults</button>
+            <button class="btn small" id="btnShowVisualization">Show visualization</button>
+          </div>
+          
+          <div id="debugVisualization" style="display: none; margin-top: 12px;">
+            <canvas id="debugCanvas" style="width: 100%; border: 1px solid rgba(255,255,255,0.2);"></canvas>
+          </div>
+        </details>
       </section>
 
       <section class="panel" id="panel-why">
