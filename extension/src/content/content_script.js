@@ -30,6 +30,8 @@
     open: false,
     everOpened: false,
     port: null,
+    iframe: null,
+    nonce: null,
     tickTimer: null,
     lastContextKey: "",
     lastUrl: location.href,
@@ -63,6 +65,7 @@
         generation: session.generation,
         bufferedFrames: ring.size,
         bufferedBytes: ring.bytes,
+        error: session.lastError,
       },
     };
   }
@@ -96,13 +99,17 @@
     ring,
     grab: grabFrame,
     isAdShowing,
-    onError: (code) => emit("CAPTURE_ERROR", { code }),
+    // The error is part of the context, so a panel that connects late still sees it.
+    onError: () => pushContextIfChanged(),
   });
 
   function onVideoEmptied() {
-    // The element was reused for a different source (e.g. autoplay).
+    // The element was reused for a different source (autoplay, or YouTube
+    // swapping the src after an SPA navigation). Frames already cleared by a
+    // video ID change don't need a second announcement.
+    const hadFrames = ring.size > 0;
     session.invalidate();
-    emit("SESSION_RESET", { reason: "SOURCE_CHANGED" });
+    if (hadFrames) emit("SESSION_RESET", { reason: "SOURCE_CHANGED" });
   }
 
   function bindVideo(video) {
@@ -120,11 +127,18 @@
     }
     const video = getVideoEl();
     const videoId = getVideoId();
-    const changed = video !== session.video || videoId !== session.videoId;
-    const hadSession = session.generation > 0;
-    const started = session.start(video, videoId);
-    bindVideo(started ? video : null);
-    if (changed && hadSession) emit("SESSION_RESET", { reason: video ? "VIDEO_CHANGED" : "PLAYER_MISSING" });
+    if (!video || !videoId) {
+      // Announce once; later ticks find nothing bound and stay quiet.
+      const wasBound = session.video !== null;
+      session.unbind();
+      bindVideo(null);
+      if (wasBound) emit("SESSION_RESET", { reason: "PLAYER_MISSING" });
+      return;
+    }
+    const changed = session.video !== null && (video !== session.video || videoId !== session.videoId);
+    session.start(video, videoId);
+    bindVideo(video);
+    if (changed) emit("SESSION_RESET", { reason: "VIDEO_CHANGED" });
   }
 
   // ---------------------------------------------------------------------------
@@ -172,7 +186,7 @@
     ui.port = channel.port1;
     ui.port.onmessage = (ev) => handleRequest(ev.data);
     // Targeted at the extension origin, so the page cannot receive the port.
-    iframe.contentWindow.postMessage({ fanDRS: "connect", v: Core.PROTOCOL_VERSION }, EXTENSION_ORIGIN, [channel.port2]);
+    iframe.contentWindow.postMessage({ fanDRS: "connect", v: Core.PROTOCOL_VERSION, nonce: ui.nonce }, EXTENSION_ORIGIN, [channel.port2]);
     ui.lastContextKey = "";
     pushContextIfChanged();
   }
@@ -228,13 +242,19 @@
       border-left: 1px solid rgba(255,255,255,0.08);
     `;
 
+    // The iframe sits in a closed shadow root created from this isolated world,
+    // so page scripts can't read its src. The nonce in the fragment is the
+    // shared secret that authenticates the connect handshake.
+    ui.nonce = crypto.randomUUID();
+    const shadow = host.attachShadow({ mode: "closed" });
     const iframe = document.createElement("iframe");
     iframe.id = ids.iframe;
     iframe.title = "Fan DRS Review panel";
-    iframe.style.cssText = "width: 100%; height: 100%; border: 0; background: transparent;";
+    iframe.style.cssText = "display: block; width: 100%; height: 100%; border: 0; background: transparent;";
     iframe.addEventListener("load", () => connectSidebar(iframe));
-    iframe.src = chrome.runtime.getURL("src/sidebar/sidebar.html");
-    host.appendChild(iframe);
+    iframe.src = `${chrome.runtime.getURL("src/sidebar/sidebar.html")}#${ui.nonce}`;
+    shadow.appendChild(iframe);
+    ui.iframe = iframe;
 
     const handle = document.createElement("button");
     handle.id = ids.handle;
@@ -253,7 +273,7 @@
     document.documentElement.appendChild(handle);
   }
 
-  function setOpen(open) {
+  function setOpen(open, { restoreFocus = true } = {}) {
     if (open && !getVideoId()) return;
     if (open) ensurePanel();
     const host = document.getElementById(ids.host);
@@ -275,12 +295,12 @@
       reconcileCapture();
       pushContextIfChanged();
       if (ui.tickTimer === null) ui.tickTimer = setInterval(onTick, CONTEXT_TICK_MS);
-      if (!wasOpen) document.getElementById(ids.iframe)?.focus();
+      if (!wasOpen) ui.iframe?.focus();
     } else {
       session.stop();
       if (ui.tickTimer !== null) clearInterval(ui.tickTimer);
       ui.tickTimer = null;
-      if (wasOpen) (btn && btn.isConnected ? btn : handle).focus();
+      if (wasOpen && restoreFocus) (btn && btn.isConnected ? btn : handle).focus();
     }
   }
 
@@ -291,13 +311,14 @@
 
   /** Removes everything when leaving watch pages. */
   function unmount() {
-    setOpen(false);
-    session.stop();
-    session.invalidate();
+    setOpen(false, { restoreFocus: false });
+    session.unbind();
     bindVideo(null);
     for (const id of [ids.button, ids.host, ids.handle]) document.getElementById(id)?.remove();
     if (ui.port) ui.port.close();
     ui.port = null;
+    ui.iframe = null;
+    ui.nonce = null;
     ui.everOpened = false;
   }
 

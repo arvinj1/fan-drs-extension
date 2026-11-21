@@ -14,6 +14,8 @@
 
   const Core = globalThis.FanDRSCore;
   const YOUTUBE_ORIGIN = "https://www.youtube.com";
+  // Shared secret from the content script, delivered in our URL fragment.
+  const NONCE = location.hash.slice(1);
 
   const $ = (id) => document.getElementById(id);
 
@@ -31,9 +33,12 @@
   // ---------------------------------------------------------------------------
 
   window.addEventListener("message", (ev) => {
-    if (state.port) return; // Accept exactly one port per page load.
+    if (state.port) return; // One authenticated port per page load.
     if (ev.source !== window.parent || ev.origin !== YOUTUBE_ORIGIN) return;
-    if (!ev.data || ev.data.fanDRS !== "connect" || ev.data.v !== Core.PROTOCOL_VERSION) return;
+    // Page scripts share the parent window, so origin and source can't tell
+    // them apart from the content script. Only the nonce can; anything without
+    // it is ignored and the real handshake can still arrive afterwards.
+    if (!Core.isAuthenticConnect(ev.data, NONCE)) return;
     const port = ev.ports && ev.ports[0];
     if (!port) return;
 
@@ -54,22 +59,30 @@
         applyContext(msg.payload);
         return;
       case "SESSION_RESET":
-        resetReview(msg.payload?.reason === "VIDEO_CHANGED" ? "New video. Marks and captured frames were cleared." : "The video source changed. Marks and captured frames were cleared.");
-        return;
-      case "CAPTURE_ERROR":
-        showCaptureError(msg.payload?.code);
+        resetReview(RESET_COPY[msg.payload?.reason] || RESET_COPY.SOURCE_CHANGED);
         return;
     }
   }
+
+  const RESET_COPY = {
+    VIDEO_CHANGED: "New video. Marks and captured frames were cleared.",
+    SOURCE_CHANGED: "The video source changed. Marks and captured frames were cleared.",
+    PLAYER_MISSING: "The YouTube player went away. Marks and captured frames were cleared; capture resumes when a video plays.",
+  };
+
+  const CAPTURE_ERROR_COPY = {
+    CAPTURE_BLOCKED: "Blocked: the browser won’t let the extension read frames from this video.",
+    CAPTURE_FAILED: "Capture failed. Pause and play the video to retry.",
+  };
 
   async function request(type, payload, key) {
     if (!state.rpc) throw Object.assign(new Error("NOT_CONNECTED"), { code: "NOT_CONNECTED" });
     return state.rpc.request(type, payload, { key });
   }
 
-  async function refreshContext() {
+  async function refreshContext(key = "context") {
     try {
-      applyContext(await request("GET_CONTEXT", undefined, "context"));
+      applyContext(await request("GET_CONTEXT", undefined, key));
       return state.ctx;
     } catch (err) {
       if (err.code !== "SUPERSEDED" && err.code !== "CANCELLED") setStatus("Can’t read the YouTube player. Reload the page and reopen the panel.");
@@ -89,9 +102,12 @@
     $("ctxTime").textContent = ctx.hasPlayer
       ? `${Core.formatTime(ctx.currentTime)} / ${ctx.isLive ? "Live" : Core.formatTime(ctx.duration)}${ctx.adShowing ? " · Ad playing" : ""}`
       : "No player found";
-    $("bufferText").textContent = ctx.capture
-      ? `${ctx.capture.running ? "Capturing" : "Paused"} · ${ctx.capture.bufferedFrames} frames buffered`
-      : "—";
+    const cap = ctx.capture;
+    $("bufferText").textContent = !cap
+      ? "—"
+      : cap.error
+        ? CAPTURE_ERROR_COPY[cap.error] || "Capture stopped unexpectedly."
+        : `${cap.running ? "Capturing" : "Paused"} · ${cap.bufferedFrames} frames buffered`;
     renderWindow();
   }
 
@@ -143,7 +159,7 @@
   }
 
   async function mark(which) {
-    const ctx = await refreshContext();
+    const ctx = await refreshContext(`mark-${which}`);
     if (!ctx || ctx.currentTime == null) return;
     state.marks[which] = ctx.currentTime;
     renderWindow();
@@ -188,6 +204,12 @@
       setStatus(err.code === "TIMEOUT" ? "The page didn’t answer in time. Try Analyze again." : "Couldn’t collect frames. Try Analyze again.");
       return;
     }
+    if (state.ctx?.capture && result.generation !== state.ctx.capture.generation) {
+      // Frames belong to a video that is no longer playing; a SESSION_RESET is on its way.
+      setPhase("idle");
+      setStatus("The video changed while collecting. Press Analyze again.");
+      return;
+    }
     renderEvidence(result);
   }
 
@@ -205,14 +227,21 @@
 
     const why = [];
     if (n === 0) {
+      if (state.ctx?.capture?.error) why.push(CAPTURE_ERROR_COPY[state.ctx.capture.error] || "Capture stopped unexpectedly.");
       why.push("No frames were captured in this window. Capture only runs while this panel is open.");
       why.push("Replay the moment with the panel open, then press Analyze.");
     } else {
       why.push(`${n} frame${n === 1 ? "" : "s"} cover ${coverage.coveredSec.toFixed(1)} of ${(result.window.t1 - result.window.t0).toFixed(1)} seconds.`);
       if (coverage.gaps.length) {
         const list = coverage.gaps.map((g) => `${Core.formatPreciseTime(g.from)}–${Core.formatPreciseTime(g.to)}`).join(", ");
-        why.push(`Missing footage: ${list}. Replay that part with the panel open to fill it.`);
+        const evicted = result.buffer.full && result.buffer.from !== null && result.buffer.from > result.window.t0;
+        why.push(
+          evicted
+            ? `Missing footage: ${list}. The buffer only holds the latest ${(result.buffer.to - result.buffer.from).toFixed(1)} seconds of footage at this playback speed, so the start of the window was overwritten. Choose a shorter window or replay at normal speed.`
+            : `Missing footage: ${list}. Replay that part with the panel open to fill it.`
+        );
       }
+      if (state.ctx?.isLive) why.push("This is a live stream. Only footage played while the panel was open can be reviewed.");
       why.push("Automatic stumping decisions aren’t enabled in this version, so the result stays inconclusive.");
     }
     setWhyBullets(why);
@@ -249,14 +278,6 @@
         return li;
       })
     );
-  }
-
-  function showCaptureError(code) {
-    const text = {
-      CAPTURE_BLOCKED: "The browser blocked reading frames from this video, so nothing can be captured here.",
-      CAPTURE_FAILED: "Frame capture failed. Pause and play the video, then try again.",
-    }[code] || "Frame capture stopped unexpectedly.";
-    setStatus(text);
   }
 
   // ---------------------------------------------------------------------------

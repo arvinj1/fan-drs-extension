@@ -46,14 +46,17 @@ for (const ref of refs) {
   if (!fs.existsSync(path.join(root, ref))) fail(`missing file referenced by manifest: ${ref}`);
 }
 
-// 3. Sidebar script references must be exposed with the page
+// 3. Sidebar subresources exist; only the page itself is web-accessible.
+//    The sidebar loads its own scripts from the extension origin, which needs
+//    no exposure (verified by the browser smoke test). Fewer exposed files
+//    means less for pages to probe when fingerprinting installed extensions.
 const sidebarHtml = fs.readFileSync(path.join(root, "src/sidebar/sidebar.html"), "utf8");
-const war = new Set((manifest.web_accessible_resources || []).flatMap((w) => w.resources));
 for (const m of sidebarHtml.matchAll(/<(?:script|link)[^>]+(?:src|href)="([^"]+)"/g)) {
   const resolved = path.posix.normalize(path.posix.join("src/sidebar", m[1]));
   if (!fs.existsSync(path.join(root, resolved))) fail(`sidebar.html references missing ${resolved}`);
-  if (!war.has(resolved)) fail(`sidebar.html loads ${resolved} but it is not in web_accessible_resources`);
 }
+const war = (manifest.web_accessible_resources || []).flatMap((w) => w.resources);
+if (war.length !== 1 || war[0] !== "src/sidebar/sidebar.html") fail(`web_accessible_resources should be exactly src/sidebar/sidebar.html, got ${JSON.stringify(war)}`);
 
 // 4. Icon dimensions
 for (const [size, rel] of Object.entries(manifest.icons || {})) {

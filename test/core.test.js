@@ -65,10 +65,15 @@ test("validateWindow returns stable reason codes", () => {
   assert.equal(Core.validateWindow({ t0: 0, t1: 0 }).reason, "WINDOW_REVERSED");
   assert.equal(Core.validateWindow({ t0: 5, t1: 4 }).reason, "WINDOW_REVERSED");
   assert.equal(Core.validateWindow({ t0: -1, t1: 4 }).reason, "WINDOW_NEGATIVE");
-  assert.equal(Core.validateWindow({ t0: 0, t1: 31 }).reason, "WINDOW_TOO_LONG");
+  assert.equal(Core.validateWindow({ t0: 0, t1: 20.01 }).reason, "WINDOW_TOO_LONG");
   assert.equal(Core.validateWindow({ t0: "1", t1: 4 }).reason, "WINDOW_INVALID");
   assert.equal(Core.validateWindow(null).reason, "WINDOW_INVALID");
-  assert.deepEqual(Core.validateWindow({ t0: 0, t1: 30 }), { ok: true, window: { t0: 0, t1: 30 } });
+  assert.deepEqual(Core.validateWindow({ t0: 0, t1: 20 }), { ok: true, window: { t0: 0, t1: 20 } });
+});
+
+test("the longest allowed window fits in a full ring at 1x playback", () => {
+  const { ringMaxFrames, captureIntervalMs, maxWindowSec } = Core.LIMITS;
+  assert.ok(maxWindowSec <= (ringMaxFrames * captureIntervalMs) / 1000);
 });
 
 test("sampleWithEndpoints keeps both ends and respects the cap", () => {
@@ -112,6 +117,16 @@ test("selectWindow only returns frames from the active generation and window", (
   assert.equal(res.frames.at(-1).mediaTime, 20);
   assert.equal(Core.selectWindow(ring, 2, { t0: 8, t1: 20 }, 60).frames.length, 0);
   assert.ok(!("bytes" in res.frames[0]));
+  assert.ok(!("jpeg" in res.frames[0]), "image data stays in the content script");
+});
+
+test("selectWindow reports the buffer span and whether older footage was evicted", () => {
+  const ring = Core.createFrameRing({ maxFrames: 4 });
+  for (const t of [1, 2]) ring.push(frame(t));
+  assert.deepEqual(Core.selectWindow(ring, 1, { t0: 0, t1: 3 }).buffer, { from: 1, to: 2, full: false });
+  for (const t of [3, 4, 5]) ring.push(frame(t));
+  assert.deepEqual(Core.selectWindow(ring, 1, { t0: 0, t1: 5 }).buffer, { from: 2, to: 5, full: true });
+  assert.deepEqual(Core.selectWindow(Core.createFrameRing(), 1, { t0: 0, t1: 5 }).buffer, { from: null, to: null, full: false });
 });
 
 // ---------------------------------------------------------------------------
@@ -168,6 +183,24 @@ test("session refuses to start without a video and does not stay running", () =>
   assert.equal(session.running, false);
   assert.equal(session.start(fakeVideo(), ""), false);
   assert.equal(session.running, false);
+});
+
+test("losing the player unbinds once: frames dropped, generation bumped, then idempotent", () => {
+  const ring = Core.createFrameRing();
+  const video = fakeVideo();
+  const session = Core.createCaptureSession({ ring, grab: okGrab });
+  session.start(video, "a");
+  video.present(0, 1);
+  const gen = session.generation;
+  session.start(null, "a");
+  assert.equal(session.video, null);
+  assert.equal(session.videoId, null);
+  assert.equal(ring.size, 0);
+  assert.equal(session.generation, gen + 1);
+  assert.equal(video.pendingCallbacks(), 0);
+  session.unbind();
+  session.start(null, "a");
+  assert.equal(session.generation, gen + 1, "repeated ticks without a player don't churn generations");
 });
 
 test("session captures with media time and throttles by wall time", () => {
@@ -280,11 +313,13 @@ test("canvas failures are reported once per streak with a stable code", () => {
   video.present(0, 1);
   video.present(300, 1.3);
   assert.deepEqual(errors, ["CAPTURE_BLOCKED"]);
+  assert.equal(session.lastError, "CAPTURE_BLOCKED", "readable as state by a late subscriber");
   fail = false;
   video.present(600, 1.6);
+  assert.equal(session.lastError, null);
   fail = true;
   video.present(900, 1.9);
-  assert.deepEqual(errors, ["CAPTURE_BLOCKED", "CAPTURE_BLOCKED"]);
+  assert.deepEqual(errors, ["CAPTURE_BLOCKED", null, "CAPTURE_BLOCKED"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -314,7 +349,19 @@ test("validateInbound accepts only known responses and events", () => {
   assert.equal(Core.validateInbound({ v, kind: "response", id: 3 }).reason, "BAD_RESPONSE");
   assert.equal(Core.validateInbound({ v, kind: "event", type: "CONTEXT_CHANGED" }).ok, true);
   assert.equal(Core.validateInbound({ v, kind: "event", type: "RUN" }).reason, "UNKNOWN_EVENT");
+  assert.equal(Core.validateInbound({ v, kind: "event", type: "CAPTURE_ERROR" }).reason, "UNKNOWN_EVENT", "errors travel as context state");
   assert.equal(Core.validateInbound({ v: 9, kind: "event", type: "CONTEXT_CHANGED" }).reason, "BAD_ENVELOPE");
+});
+
+test("connect handshake requires the exact nonce", () => {
+  const v = Core.PROTOCOL_VERSION;
+  const nonce = "4f1c1a1e-2b7d-4c55-9f0e-6f2b1b9a7c10";
+  assert.equal(Core.isAuthenticConnect({ fanDRS: "connect", v, nonce }, nonce), true);
+  assert.equal(Core.isAuthenticConnect({ fanDRS: "connect", v }, nonce), false);
+  assert.equal(Core.isAuthenticConnect({ fanDRS: "connect", v, nonce: "guess" }, nonce), false);
+  assert.equal(Core.isAuthenticConnect({ fanDRS: "connect", v, nonce: "" }, ""), false, "no nonce in the URL means no connection");
+  assert.equal(Core.isAuthenticConnect({ fanDRS: "connect", v: 0, nonce }, nonce), false);
+  assert.equal(Core.isAuthenticConnect(null, nonce), false);
 });
 
 function rpcHarness() {
@@ -381,5 +428,6 @@ test("time formatting handles zero, hours and invalid input", () => {
   assert.equal(Core.formatTime(Infinity), "—");
   assert.equal(Core.formatPreciseTime(62.25), "1:02.25");
   assert.equal(Core.formatPreciseTime(0), "0:00.00");
-  assert.equal(Core.formatPreciseTime(1.999), "0:01.99");
+  assert.equal(Core.formatPreciseTime(1.996), "0:02.00");
+  assert.equal(Core.formatPreciseTime(59.999), "1:00.00");
 });

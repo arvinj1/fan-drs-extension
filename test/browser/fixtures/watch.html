@@ -23,17 +23,27 @@
     clipUrl.then((u) => (document.querySelector("video.html5-main-video").src = u));
 
     // Test hooks: simulate YouTube SPA navigation without a reload.
-    window.fixtureNavigate = async (url, { withPlayer = true } = {}) => {
+    // reuse: keep the same <video> and swap its source after the route change,
+    //        the way YouTube does between watch pages.
+    // crossOrigin: play a clip from another origin without CORS, which taints
+    //        the canvas and makes capture fail with SecurityError.
+    window.fixtureNavigate = async (url, { withPlayer = true, reuse = false, crossOrigin = false } = {}) => {
       history.pushState({}, "", url);
       const player = document.getElementById("movie_player");
+      const src = crossOrigin ? "https://media.fixture.example/clip.webm" : await clipUrl;
       if (!withPlayer) {
         player.replaceChildren();
+      } else if (reuse && player.querySelector("video")) {
+        document.dispatchEvent(new Event("yt-navigate-finish"));
+        await new Promise((r) => setTimeout(r, 300));
+        player.querySelector("video").src = src;
+        return;
       } else {
         const v = document.createElement("video");
         v.className = "html5-main-video";
         v.muted = true;
         v.playsInline = true;
-        v.src = await clipUrl;
+        v.src = src;
         player.replaceChildren(v);
       }
       document.dispatchEvent(new Event("yt-navigate-finish"));

@@ -36,10 +36,7 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "src/sidebar/sidebar.html",
-        "src/sidebar/sidebar.css",
-        "src/sidebar/sidebar.js",
-        "src/shared/core.js"
+        "src/sidebar/sidebar.html"
       ],
       "matches": [
         "https://www.youtube.com/*"

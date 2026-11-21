@@ -19,7 +19,8 @@
     ringMaxBytes: 8 * 1024 * 1024,
     analysisMaxFrames: 60,
     defaultWindowSec: 12,
-    maxWindowSec: 30,
+    // Must fit in the ring at 1x playback (90 frames x 250 ms = 22.5 s).
+    maxWindowSec: 20,
     // A gap is reported when two consecutive frames are further apart than
     // this, in media seconds. Three missed capture ticks at 1x playback.
     gapThresholdSec: 0.75,
@@ -85,6 +86,10 @@
       get bytes() {
         return bytes;
       },
+      /** True once the ring has started evicting, i.e. older footage is gone. */
+      get full() {
+        return frames.length >= maxFrames || bytes > maxBytes * 0.9;
+      },
     };
   }
 
@@ -149,16 +154,26 @@
     };
   }
 
-  /** Builds the KEYFRAMES response payload for one validated window. */
+  /**
+   * Builds the KEYFRAMES response payload for one validated window.
+   * Frame records carry metadata only; image data stays in the content
+   * script until a consumer (the slice B frame rail) actually needs it.
+   */
   function selectWindow(ring, generation, win, maxFrames = LIMITS.analysisMaxFrames) {
-    const inWindow = ring.framesFor(generation).filter((f) => f.mediaTime >= win.t0 && f.mediaTime <= win.t1);
+    const all = ring.framesFor(generation);
+    const inWindow = all.filter((f) => f.mediaTime >= win.t0 && f.mediaTime <= win.t1);
     const sampled = sampleWithEndpoints(inWindow, Math.min(maxFrames, LIMITS.analysisMaxFrames));
     return {
       window: { t0: win.t0, t1: win.t1 },
       generation,
       framesInWindow: inWindow.length,
-      frames: sampled.map(({ id, videoId, mediaTime, width, height, jpeg }) => ({ id, videoId, mediaTime, width, height, jpeg })),
+      frames: sampled.map(({ id, videoId, mediaTime, width, height }) => ({ id, videoId, mediaTime, width, height })),
       coverage: measureCoverage(win, inWindow.map((f) => f.mediaTime)),
+      buffer: {
+        from: all.length ? all[0].mediaTime : null,
+        to: all.length ? all[all.length - 1].mediaTime : null,
+        full: ring.full,
+      },
     };
   }
 
@@ -169,7 +184,9 @@
   /**
    * grab(video) -> { jpeg, width, height } | null  (throws on canvas failure)
    * isAdShowing() -> boolean
-   * onError(code, error) is called once per failure streak with a stable code.
+   * onError(code, error) is called when a failure streak starts (stable code)
+   * and with null when capture recovers. The current code is also readable as
+   * session.lastError, so a late subscriber never misses it.
    */
   function createCaptureSession({ ring, grab, isAdShowing = () => false, onError = () => {}, setInterval: si = setInterval, clearInterval: ci = clearInterval, intervalMs = LIMITS.captureIntervalMs }) {
     let video = null;
@@ -197,7 +214,10 @@
         return;
       }
       if (!image) return;
-      lastError = null;
+      if (lastError !== null) {
+        lastError = null;
+        onError(null);
+      }
       ring.push({ mediaTime, jpeg: image.jpeg, width: image.width, height: image.height, videoId, generation });
     }
 
@@ -227,7 +247,7 @@
        */
       start(nextVideo, nextVideoId) {
         if (!nextVideo || !isNonEmptyString(nextVideoId)) {
-          this.stop();
+          this.unbind();
           return false;
         }
         if (nextVideo !== video || nextVideoId !== videoId) {
@@ -257,6 +277,18 @@
         ring.clear();
         generation += 1;
       },
+      /** Stops, forgets the bound video and drops its frames (player gone, or leaving /watch). */
+      unbind() {
+        this.stop();
+        if (video === null && videoId === null) return;
+        video = null;
+        videoId = null;
+        this.invalidate();
+      },
+      /** Stable code of the current capture failure streak, or null. */
+      get lastError() {
+        return lastError;
+      },
       get running() {
         return running;
       },
@@ -278,7 +310,22 @@
   // ---------------------------------------------------------------------------
 
   const REQUEST_TYPES = Object.freeze(["GET_CONTEXT", "GET_KEYFRAMES", "CLOSE"]);
-  const EVENT_TYPES = Object.freeze(["CONTEXT_CHANGED", "SESSION_RESET", "CAPTURE_ERROR"]);
+  const EVENT_TYPES = Object.freeze(["CONTEXT_CHANGED", "SESSION_RESET"]);
+
+  /**
+   * The connect handshake is authenticated by a nonce that only the content
+   * script and the sidebar know: it travels in the iframe URL fragment, and
+   * the iframe lives in a closed shadow root, so page scripts can't read it.
+   */
+  function isAuthenticConnect(data, expectedNonce) {
+    return Boolean(
+      data &&
+        data.fanDRS === "connect" &&
+        data.v === PROTOCOL_VERSION &&
+        isNonEmptyString(expectedNonce) &&
+        data.nonce === expectedNonce
+    );
+  }
 
   /** Validates a sidebar -> content request. Returns { ok, reason }. */
   function validateRequest(msg) {
@@ -378,8 +425,8 @@
   /** Precise label for a frame or mark, e.g. 1:02.25. */
   function formatPreciseTime(sec) {
     if (!isFiniteNumber(sec) || sec < 0) return "—";
-    const frac = Math.round((sec - Math.floor(sec)) * 100);
-    return `${formatTime(sec)}.${String(Math.min(frac, 99)).padStart(2, "0")}`;
+    const hundredths = Math.round(sec * 100);
+    return `${formatTime(Math.floor(hundredths / 100))}.${String(hundredths % 100).padStart(2, "0")}`;
   }
 
   const api = Object.freeze({
@@ -394,6 +441,7 @@
     createCaptureSession,
     validateRequest,
     validateInbound,
+    isAuthenticConnect,
     createRpcClient,
     formatTime,
     formatPreciseTime,
