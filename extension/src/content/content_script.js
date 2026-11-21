@@ -30,7 +30,11 @@
     open: false,
     everOpened: false,
     port: null,
+    host: null,
+    handle: null,
     iframe: null,
+    /** Generation whose reset the sidebar has already been told about. */
+    announcedGeneration: 0,
     nonce: null,
     tickTimer: null,
     lastContextKey: "",
@@ -105,11 +109,19 @@
 
   function onVideoEmptied() {
     // The element was reused for a different source (autoplay, or YouTube
-    // swapping the src after an SPA navigation). Frames already cleared by a
-    // video ID change don't need a second announcement.
-    const hadFrames = ring.size > 0;
+    // swapping the src after an SPA navigation). If this generation's reset
+    // was already announced (the video ID changed first), drop the old
+    // source's frames quietly; otherwise announce so marks are cleared too.
+    const alreadyAnnounced = ui.announcedGeneration === session.generation;
     session.invalidate();
-    if (hadFrames) emit("SESSION_RESET", { reason: "SOURCE_CHANGED" });
+    // Only one quiet drop per announcement: the new generation is unannounced,
+    // so the next genuine source change is reported.
+    if (!alreadyAnnounced) announceReset("SOURCE_CHANGED");
+  }
+
+  function announceReset(reason) {
+    ui.announcedGeneration = session.generation;
+    emit("SESSION_RESET", { reason });
   }
 
   function bindVideo(video) {
@@ -132,13 +144,13 @@
       const wasBound = session.video !== null;
       session.unbind();
       bindVideo(null);
-      if (wasBound) emit("SESSION_RESET", { reason: "PLAYER_MISSING" });
+      if (wasBound) announceReset("PLAYER_MISSING");
       return;
     }
     const changed = session.video !== null && (video !== session.video || videoId !== session.videoId);
     session.start(video, videoId);
     bindVideo(video);
-    if (changed) emit("SESSION_RESET", { reason: "VIDEO_CHANGED" });
+    if (changed) announceReset("VIDEO_CHANGED");
   }
 
   // ---------------------------------------------------------------------------
@@ -228,7 +240,7 @@
   }
 
   function ensurePanel() {
-    if (document.getElementById(ids.host)) return;
+    if (ui.host && ui.host.isConnected) return;
 
     const host = document.createElement("div");
     host.id = ids.host;
@@ -271,13 +283,14 @@
 
     document.documentElement.appendChild(host);
     document.documentElement.appendChild(handle);
+    ui.host = host;
+    ui.handle = handle;
   }
 
   function setOpen(open, { restoreFocus = true } = {}) {
     if (open && !getVideoId()) return;
     if (open) ensurePanel();
-    const host = document.getElementById(ids.host);
-    const handle = document.getElementById(ids.handle);
+    const { host, handle } = ui;
     const btn = document.getElementById(ids.button);
     if (!host || !handle) return;
 
@@ -314,7 +327,11 @@
     setOpen(false, { restoreFocus: false });
     session.unbind();
     bindVideo(null);
-    for (const id of [ids.button, ids.host, ids.handle]) document.getElementById(id)?.remove();
+    document.getElementById(ids.button)?.remove();
+    ui.host?.remove();
+    ui.handle?.remove();
+    ui.host = null;
+    ui.handle = null;
     if (ui.port) ui.port.close();
     ui.port = null;
     ui.iframe = null;

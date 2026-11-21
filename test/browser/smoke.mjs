@@ -240,6 +240,16 @@ await step("same <video> reused across navigation clears old frames and marks", 
   expect(sameElement, "fixture did not reuse the element");
 });
 
+await step("a source change on the same URL clears marks set while paused", async () => {
+  await page.evaluate(() => document.querySelector("video.html5-main-video").pause());
+  await panel().locator("#btnReset").click();
+  await panel().locator("#btnMarkStart").click();
+  await panel().locator("#markStartValue", { hasText: /\d:\d\d\.\d\d/ }).waitFor({ timeout: 2000 });
+  await page.evaluate(() => window.fixtureNavigate(location.pathname + location.search, { reuse: true }));
+  await panel().locator("#statusText", { hasText: "source changed" }).waitFor({ timeout: 3000 });
+  expect((await text("#markStartValue")) === "Not set", "paused marks survived a source change");
+});
+
 await step("missing player is announced once, then recovered when the player appears", async () => {
   await page.evaluate(() => window.fixtureNavigate("/watch?v=fixtureC", { withPlayer: false }));
   await panel().locator("#ctxTime", { hasText: "No player found" }).waitFor({ timeout: 3000 });
@@ -315,7 +325,10 @@ await step("blocked capture is shown on first open, even before the panel connec
   await p.waitForSelector("#fan-drs-btn");
   await p.click("#fan-drs-btn");
   const frame = await waitForSidebar(p);
-  await frame.locator("#bufferText", { hasText: "Blocked" }).waitFor({ timeout: 5000 });
+  await frame.locator("#bufferText", { hasText: "Blocked" }).waitFor({ timeout: 5000 }).catch(async (err) => {
+    const v = await p.evaluate(() => { const el = document.querySelector("video.html5-main-video"); return { rs: el.readyState, paused: el.paused, t: el.currentTime, src: el.src, err: el.error && el.error.code }; });
+    throw new Error(`${err.message.split("\n")[0]} | buffer: ${await frame.locator("#bufferText").innerText()} | video: ${JSON.stringify(v)}`);
+  });
   await frame.locator("#btnReset").click();
   expect(/Blocked/.test(await frame.locator("#bufferText").innerText()), "Reset hid the capture error");
   await p.close();

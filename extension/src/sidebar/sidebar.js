@@ -205,7 +205,7 @@
       return;
     }
     if (state.ctx?.capture && result.generation !== state.ctx.capture.generation) {
-      // Frames belong to a video that is no longer playing; a SESSION_RESET is on its way.
+      // The frames belong to a source that is no longer playing.
       setPhase("idle");
       setStatus("The video changed while collecting. Press Analyze again.");
       return;
@@ -230,6 +230,7 @@
       if (state.ctx?.capture?.error) why.push(CAPTURE_ERROR_COPY[state.ctx.capture.error] || "Capture stopped unexpectedly.");
       why.push("No frames were captured in this window. Capture only runs while this panel is open.");
       why.push("Replay the moment with the panel open, then press Analyze.");
+      if (state.ctx?.isLive) why.push("This is a live stream. Only footage played while the panel was open can be reviewed.");
     } else {
       why.push(`${n} frame${n === 1 ? "" : "s"} cover ${coverage.coveredSec.toFixed(1)} of ${(result.window.t1 - result.window.t0).toFixed(1)} seconds.`);
       if (coverage.gaps.length) {
