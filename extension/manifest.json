@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Fan DRS Review",
-  "version": "0.1.1",
-  "description": "Fan-style DRS review for cricket dismissals on YouTube (stumping + official DRS extraction + LBW calibration).",
+  "version": "0.2.0",
+  "description": "Review cricket replays on YouTube: mark a window and see which frames were captured. Evidence only; runs on your device.",
   "action": {
     "default_title": "Fan DRS Review"
   },
@@ -27,6 +27,7 @@
         "https://www.youtube.com/*"
       ],
       "js": [
+        "src/shared/core.js",
         "src/content/content_script.js"
       ],
       "run_at": "document_idle"
@@ -37,7 +38,8 @@
       "resources": [
         "src/sidebar/sidebar.html",
         "src/sidebar/sidebar.css",
-        "src/sidebar/sidebar.js"
+        "src/sidebar/sidebar.js",
+        "src/shared/core.js"
       ],
       "matches": [
         "https://www.youtube.com/*"

@@ -1,0 +1,43 @@
+<!doctype html>
+<!--
+  Minimal stand-in for a YouTube /watch page, served by the smoke harness at
+  https://www.youtube.com/watch?v=... through request routing. It reproduces
+  only the selectors the content script reads. The clip is synthetic
+  (ffmpeg testsrc2), generated for this repository; no YouTube media is used.
+-->
+<html>
+<head><meta charset="utf-8"><title>Fixture watch page</title></head>
+<body style="margin:0;background:#0f0f0f;color:#fff;font-family:system-ui">
+  <div id="movie_player">
+    <video class="html5-main-video" muted playsinline width="640" height="360"></video>
+  </div>
+  <ytd-watch-metadata>
+    <h1 class="ytd-watch-metadata">Fixture: synthetic test pattern</h1>
+  </ytd-watch-metadata>
+  <ytd-channel-name><a href="#">Fixture channel</a></ytd-channel-name>
+  <div id="actions"><div id="top-level-buttons-computed"><button type="button">Like</button></div></div>
+  <script>
+    // Routed responses don't support Range requests, so the clip is loaded as a
+    // blob to make seeking work like it does on YouTube.
+    const clipUrl = fetch("/fixture/clip.webm").then((r) => r.blob()).then((b) => URL.createObjectURL(b));
+    clipUrl.then((u) => (document.querySelector("video.html5-main-video").src = u));
+
+    // Test hooks: simulate YouTube SPA navigation without a reload.
+    window.fixtureNavigate = async (url, { withPlayer = true } = {}) => {
+      history.pushState({}, "", url);
+      const player = document.getElementById("movie_player");
+      if (!withPlayer) {
+        player.replaceChildren();
+      } else {
+        const v = document.createElement("video");
+        v.className = "html5-main-video";
+        v.muted = true;
+        v.playsInline = true;
+        v.src = await clipUrl;
+        player.replaceChildren(v);
+      }
+      document.dispatchEvent(new Event("yt-navigate-finish"));
+    };
+  </script>
+</body>
+</html>

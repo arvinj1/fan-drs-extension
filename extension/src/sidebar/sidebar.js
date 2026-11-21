@@ -1,164 +1,324 @@
 /**
- * Fan DRS Review - Sidebar Controller
- * Phase 1: Context + keyframe request + stub analysis output
+ * Fan DRS Review - Sidebar Controller (slice A1)
+ *
+ * Talks to the content script over a private MessageChannel port that the
+ * content script transfers once after this page loads. Every request is
+ * correlated and time-bounded; Reset, a new analysis or a session reset
+ * cancels anything in flight so a late answer cannot change the UI.
+ *
+ * This release reports evidence only: what was captured for the chosen
+ * window and what is missing. It makes no dismissal decision.
  */
-const state = {
-  ctx: null,
-  keyframes: null,
-};
+(function fanDrsSidebar() {
+  "use strict";
 
-function $(id){ return document.getElementById(id); }
+  const Core = globalThis.FanDRSCore;
+  const YOUTUBE_ORIGIN = "https://www.youtube.com";
 
-function setVerdict(verdict, confidence, modePillText) {
-  $("verdictValue").textContent = verdict;
-  $("meterFill").style.width = `${Math.round((confidence || 0)*100)}%`;
-  $("meterValue").textContent = confidence ? `${Math.round(confidence*100)}%` : "—";
-  $("modePill").textContent = modePillText || "FAN";
-}
+  const $ = (id) => document.getElementById(id);
 
-function setStatus(text) { $("statusText").textContent = text; }
+  const state = {
+    port: null,
+    rpc: null,
+    ctx: null,
+    /** User-chosen window; null means "last 12 seconds" at Analyze time. */
+    marks: { start: null, end: null },
+    phase: "idle", // idle | collecting | ready | error
+  };
 
-function setDRSCard({ pitching="—", impact="—", wickets="—", official="—" } = {}){
-  $("drsPitching").textContent = pitching;
-  $("drsImpact").textContent = impact;
-  $("drsWickets").textContent = wickets;
-  $("drsOfficial").textContent = official;
-}
+  // ---------------------------------------------------------------------------
+  // Connection
+  // ---------------------------------------------------------------------------
 
-function setWhyBullets(items){
-  const ul = $("whyBullets");
-  ul.innerHTML = "";
-  for (const it of items) {
-    const li = document.createElement("li");
-    li.textContent = it;
-    ul.appendChild(li);
-  }
-}
+  window.addEventListener("message", (ev) => {
+    if (state.port) return; // Accept exactly one port per page load.
+    if (ev.source !== window.parent || ev.origin !== YOUTUBE_ORIGIN) return;
+    if (!ev.data || ev.data.fanDRS !== "connect" || ev.data.v !== Core.PROTOCOL_VERSION) return;
+    const port = ev.ports && ev.ports[0];
+    if (!port) return;
 
-function formatTime(sec){
-  if (sec == null || Number.isNaN(sec)) return "—";
-  const m = Math.floor(sec/60);
-  const s = Math.floor(sec%60);
-  return `${m}:${String(s).padStart(2,'0')}`;
-}
-
-function requestContext(){
-  window.parent.postMessage({ __fanDRS: true, type: "REQUEST_CONTEXT" }, "*");
-}
-
-function requestKeyframes(t0, t1, maxFrames=60){
-  window.parent.postMessage({ __fanDRS: true, type: "REQUEST_KEYFRAMES", payload: { t0, t1, maxFrames } }, "*");
-}
-
-window.addEventListener("message", (ev) => {
-  if (!ev.data || ev.data.__fanDRS !== true) return;
-
-  if (ev.data.type === "KEYFRAMES_RESPONSE") {
-    state.keyframes = ev.data.payload;
-    const n = state.keyframes?.frames?.length ?? 0;
-    setStatus(`Captured ${n} keyframes for analysis.`);
-    return;
-  }
-
-  if (ev.data.type === "CONTEXT") {
-    state.ctx = ev.data.payload;
-    $("ctxTitle").textContent = state.ctx.title || "—";
-    $("ctxChannel").textContent = state.ctx.channel || "—";
-    $("ctxTime").textContent = `${formatTime(state.ctx.currentTime)} / ${formatTime(state.ctx.duration)}`;
-  }
-});
-
-// Tabs
-document.querySelectorAll(".tab").forEach((b) => {
-  b.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-    document.querySelectorAll(".panel").forEach(x => x.classList.remove("active"));
-    b.classList.add("active");
-    document.getElementById(`panel-${b.dataset.tab}`).classList.add("active");
+    state.port = port;
+    state.rpc = Core.createRpcClient((msg) => port.postMessage(msg));
+    port.onmessage = (e) => onInbound(e.data);
+    refreshContext();
   });
-});
 
-$("btnClose").addEventListener("click", () => {
-  window.parent.postMessage({ __fanDRS: true, type: "CLOSE_REQUEST" }, "*");
-});
-
-$("btnLast12").addEventListener("click", () => {
-  $("windowText").textContent = "Will analyze last 12 seconds from current playback time.";
-});
-
-$("btnMarkStart").addEventListener("click", () => {
-  $("windowText").textContent = "Mark Start: (Coming soon)";
-});
-
-$("btnMarkEnd").addEventListener("click", () => {
-  $("windowText").textContent = "Mark End: (Coming soon)";
-});
-
-$("btnReset").addEventListener("click", () => {
-  state.keyframes = null;
-  setVerdict("—", 0, "WAITING");
-  setDRSCard({});
-  setWhyBullets([
-    "We haven’t analyzed this clip yet.",
-    "Click Analyze to capture keyframes and begin.",
-    "We’ll stay conservative on close calls."
-  ]);
-  setStatus("Ready.");
-});
-
-// Analyze button (Phase 1: keyframes + stub analysis)
-$("btnAnalyze").addEventListener("click", async () => {
-  requestContext();
-  setStatus("Collecting context…");
-  await new Promise(r => setTimeout(r, 250));
-
-  if (!state.ctx?.videoId || state.ctx.currentTime == null) {
-    setStatus("Could not read YouTube video context. Try reloading the page.");
-    return;
+  function onInbound(msg) {
+    if (!Core.validateInbound(msg).ok) return;
+    if (msg.kind === "response") {
+      state.rpc.handleResponse(msg);
+      return;
+    }
+    switch (msg.type) {
+      case "CONTEXT_CHANGED":
+        applyContext(msg.payload);
+        return;
+      case "SESSION_RESET":
+        resetReview(msg.payload?.reason === "VIDEO_CHANGED" ? "New video. Marks and captured frames were cleared." : "The video source changed. Marks and captured frames were cleared.");
+        return;
+      case "CAPTURE_ERROR":
+        showCaptureError(msg.payload?.code);
+        return;
+    }
   }
 
-  const t1 = state.ctx.currentTime;
-  const t0 = Math.max(0, t1 - 12);
-  $("windowText").textContent = `Analyzing ${formatTime(t0)} → ${formatTime(t1)} (last 12s)`;
+  async function request(type, payload, key) {
+    if (!state.rpc) throw Object.assign(new Error("NOT_CONNECTED"), { code: "NOT_CONNECTED" });
+    return state.rpc.request(type, payload, { key });
+  }
 
-  setStatus("Capturing keyframes (rolling buffer)…");
-  requestKeyframes(t0, t1, 60);
+  async function refreshContext() {
+    try {
+      applyContext(await request("GET_CONTEXT", undefined, "context"));
+      return state.ctx;
+    } catch (err) {
+      if (err.code !== "SUPERSEDED" && err.code !== "CANCELLED") setStatus("Can’t read the YouTube player. Reload the page and reopen the panel.");
+      return null;
+    }
+  }
 
-  await new Promise(r => setTimeout(r, 450));
+  // ---------------------------------------------------------------------------
+  // Context
+  // ---------------------------------------------------------------------------
 
-  const n = state.keyframes?.frames?.length ?? 0;
-  if (n < 6) {
-    setVerdict("INCONCLUSIVE", 0.35, "WAIT: MORE FRAMES");
+  function applyContext(ctx) {
+    if (!ctx) return;
+    state.ctx = ctx;
+    $("ctxTitle").textContent = ctx.title || "—";
+    $("ctxChannel").textContent = ctx.channel || "—";
+    $("ctxTime").textContent = ctx.hasPlayer
+      ? `${Core.formatTime(ctx.currentTime)} / ${ctx.isLive ? "Live" : Core.formatTime(ctx.duration)}${ctx.adShowing ? " · Ad playing" : ""}`
+      : "No player found";
+    $("bufferText").textContent = ctx.capture
+      ? `${ctx.capture.running ? "Capturing" : "Paused"} · ${ctx.capture.bufferedFrames} frames buffered`
+      : "—";
+    renderWindow();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Window selection
+  // ---------------------------------------------------------------------------
+
+  function currentWindow() {
+    const { start, end } = state.marks;
+    if (start !== null && end !== null) return { t0: start, t1: end, source: "marks" };
+    if (start !== null && state.ctx?.currentTime != null) return { t0: start, t1: state.ctx.currentTime, source: "start" };
+    if (end !== null) return { ...Core.lastSecondsWindow(end), source: "end" };
+    const last = Core.lastSecondsWindow(state.ctx?.currentTime);
+    return last ? { ...last, source: "last" } : null;
+  }
+
+  const WINDOW_ERRORS = {
+    WINDOW_INVALID: "Play the video for a moment so the player time is available.",
+    WINDOW_NEGATIVE: "The window starts before the video does.",
+    WINDOW_REVERSED: "The end mark is at or before the start mark. Set them again.",
+    WINDOW_TOO_LONG: `Windows can be at most ${Core.LIMITS.maxWindowSec} seconds. Move the marks closer together.`,
+  };
+
+  /** Explains an invalid window in terms of what the user did to produce it. */
+  function windowError(win, reason) {
+    if (reason === "WINDOW_REVERSED" && win.source !== "marks") return "Play the video past the moment you want to review.";
+    return WINDOW_ERRORS[reason];
+  }
+
+  function renderWindow() {
+    const win = currentWindow();
+    const { start, end } = state.marks;
+    $("markStartValue").textContent = start === null ? "Not set" : Core.formatPreciseTime(start);
+    $("markEndValue").textContent = end === null ? "Not set" : Core.formatPreciseTime(end);
+    $("btnClearMarks").disabled = start === null && end === null;
+    if (!win) {
+      $("windowText").textContent = "Waiting for the player time.";
+      return;
+    }
+    const check = Core.validateWindow(win);
+    const range = `${Core.formatPreciseTime(win.t0)} → ${Core.formatPreciseTime(win.t1)}`;
+    const label = {
+      last: `Last 12 seconds: ${range}`,
+      marks: `Marked window: ${range}`,
+      start: `From your start mark to now: ${range}`,
+      end: `12 seconds before your end mark: ${range}`,
+    }[win.source];
+    $("windowText").textContent = check.ok ? label : `${label}. ${windowError(win, check.reason)}`;
+  }
+
+  async function mark(which) {
+    const ctx = await refreshContext();
+    if (!ctx || ctx.currentTime == null) return;
+    state.marks[which] = ctx.currentTime;
+    renderWindow();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Evidence
+  // ---------------------------------------------------------------------------
+
+  function setStatus(text) {
+    $("statusText").textContent = text;
+  }
+
+  function setPhase(phase) {
+    state.phase = phase;
+    $("btnAnalyze").disabled = phase === "collecting";
+    $("btnAnalyze").textContent = phase === "collecting" ? "Collecting…" : "Analyze";
+  }
+
+  async function analyze() {
+    const ctx = await refreshContext();
+    if (!ctx) return;
+    if (!ctx.hasPlayer) {
+      setStatus("No YouTube player on this page. Open a video and try again.");
+      return;
+    }
+    const win = currentWindow();
+    const check = Core.validateWindow(win);
+    if (!check.ok) {
+      setStatus(windowError(win, check.reason));
+      return;
+    }
+
+    setPhase("collecting");
+    setStatus("Collecting captured frames for the window…");
+    let result;
+    try {
+      result = await request("GET_KEYFRAMES", { ...check.window, maxFrames: Core.LIMITS.analysisMaxFrames }, "analysis");
+    } catch (err) {
+      if (err.code === "SUPERSEDED" || err.code === "CANCELLED") return;
+      setPhase("error");
+      setStatus(err.code === "TIMEOUT" ? "The page didn’t answer in time. Try Analyze again." : "Couldn’t collect frames. Try Analyze again.");
+      return;
+    }
+    renderEvidence(result);
+  }
+
+  function renderEvidence(result) {
+    const n = result.frames.length;
+    const { coverage } = result;
+    const pct = Math.round(coverage.ratio * 100);
+    setPhase("ready");
+
+    $("verdictValue").textContent = n === 0 ? "NO EVIDENCE" : "INCONCLUSIVE";
+    $("modePill").textContent = "EVIDENCE ONLY";
+    $("meterFill").style.width = `${pct}%`;
+    $("meterValue").textContent = `${pct}% of the window (${coverage.coveredSec.toFixed(1)} s) · ${n} frame${n === 1 ? "" : "s"}`;
+    renderTimeline(result);
+
+    const why = [];
+    if (n === 0) {
+      why.push("No frames were captured in this window. Capture only runs while this panel is open.");
+      why.push("Replay the moment with the panel open, then press Analyze.");
+    } else {
+      why.push(`${n} frame${n === 1 ? "" : "s"} cover ${coverage.coveredSec.toFixed(1)} of ${(result.window.t1 - result.window.t0).toFixed(1)} seconds.`);
+      if (coverage.gaps.length) {
+        const list = coverage.gaps.map((g) => `${Core.formatPreciseTime(g.from)}–${Core.formatPreciseTime(g.to)}`).join(", ");
+        why.push(`Missing footage: ${list}. Replay that part with the panel open to fill it.`);
+      }
+      why.push("Automatic stumping decisions aren’t enabled in this version, so the result stays inconclusive.");
+    }
+    setWhyBullets(why);
+    setStatus(n === 0 ? "Nothing captured for this window yet." : `Collected ${n} frames.`);
+  }
+
+  function renderTimeline(result) {
+    const bar = $("timelineBar");
+    bar.replaceChildren();
+    const span = result.window.t1 - result.window.t0;
+    const pos = (t) => `${((t - result.window.t0) / span) * 100}%`;
+    for (const gap of result.coverage.gaps) {
+      const el = document.createElement("div");
+      el.className = "gap";
+      el.style.left = pos(gap.from);
+      el.style.width = `calc(${pos(gap.to)} - ${pos(gap.from)})`;
+      bar.appendChild(el);
+    }
+    for (const f of result.frames) {
+      const el = document.createElement("div");
+      el.className = "tick";
+      el.style.left = pos(f.mediaTime);
+      bar.appendChild(el);
+    }
+    $("timelineLegend").textContent = `${Core.formatPreciseTime(result.window.t0)} → ${Core.formatPreciseTime(result.window.t1)} · ticks are captured frames, hatched areas are gaps.`;
+  }
+
+  function setWhyBullets(items) {
+    const ul = $("whyBullets");
+    ul.replaceChildren(
+      ...items.map((text) => {
+        const li = document.createElement("li");
+        li.textContent = text;
+        return li;
+      })
+    );
+  }
+
+  function showCaptureError(code) {
+    const text = {
+      CAPTURE_BLOCKED: "The browser blocked reading frames from this video, so nothing can be captured here.",
+      CAPTURE_FAILED: "Frame capture failed. Pause and play the video, then try again.",
+    }[code] || "Frame capture stopped unexpectedly.";
+    setStatus(text);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reset
+  // ---------------------------------------------------------------------------
+
+  function resetReview(statusText = "Ready.") {
+    if (state.rpc) state.rpc.cancelAll("CANCELLED");
+    state.marks = { start: null, end: null };
+    setPhase("idle");
+    $("verdictValue").textContent = "—";
+    $("modePill").textContent = "WAITING";
+    $("meterFill").style.width = "0%";
+    $("meterValue").textContent = "—";
+    $("timelineBar").replaceChildren();
+    $("timelineLegend").textContent = "Captured frames and gaps appear here after Analyze.";
     setWhyBullets([
-      "Not enough keyframes captured yet. Keep the sidebar open for ~2–3 seconds and try again.",
-      "We keep a rolling buffer so we can analyze the last few seconds without seeking.",
-      "On close calls, we prefer INCONCLUSIVE over pretending."
+      "Nothing analyzed yet.",
+      "Replay the dismissal with this panel open, then press Analyze.",
+      "This version shows what the captured frames cover. It doesn’t decide OUT or NOT OUT.",
     ]);
-    setStatus("Not enough keyframes yet. Try again in a moment.");
-    return;
+    setStatus(statusText);
+    renderWindow();
+    if (state.rpc) refreshContext();
   }
 
-  setStatus("Running Fan DRS (stub analysis)…");
-  await new Promise(r => setTimeout(r, 450));
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
 
-  setVerdict("INCONCLUSIVE", 0.42, "FAN SIM");
-  setDRSCard({
-    pitching: "—",
-    impact: "—",
-    wickets: "—",
-    official: "Official DRS parsing not implemented yet"
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach((t) => {
+        t.classList.toggle("active", t === tab);
+        t.setAttribute("aria-selected", String(t === tab));
+      });
+      document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === `panel-${tab.dataset.tab}`));
+    });
   });
-  setWhyBullets([
-    `Captured ${n} keyframes for the selected window.`,
-    "Next: implement stumping (crease + bail-off + foot) and official DRS OCR.",
-    "Confidence will rise when evidence is strong or user helps in Challenge Mode."
-  ]);
-  setStatus("Done (keyframes captured).");
-});
 
-$("btnAgree").addEventListener("click", () => $("feedbackText").textContent = "Thanks — recorded: Agree (local stub).");
-$("btnDisagree").addEventListener("click", () => $("feedbackText").textContent = "Thanks — recorded: Disagree (local stub).");
-$("btnNotSure").addEventListener("click", () => $("feedbackText").textContent = "Thanks — recorded: Not sure (local stub).");
+  $("btnClose").addEventListener("click", () => {
+    if (state.rpc) state.rpc.cancelAll("CANCELLED");
+    request("CLOSE", undefined, "close").catch(() => {});
+  });
+  $("btnLast12").addEventListener("click", () => {
+    state.marks = { start: null, end: null };
+    refreshContext();
+  });
+  $("btnMarkStart").addEventListener("click", () => mark("start"));
+  $("btnMarkEnd").addEventListener("click", () => mark("end"));
+  $("btnClearMarks").addEventListener("click", () => {
+    state.marks = { start: null, end: null };
+    renderWindow();
+  });
+  $("btnAnalyze").addEventListener("click", analyze);
+  $("btnReset").addEventListener("click", () => resetReview());
 
-requestContext();
-setVerdict("—", 0, "WAITING");
+  for (const [id, label] of [["btnAgree", "Agree"], ["btnDisagree", "Disagree"], ["btnNotSure", "Not sure"]]) {
+    $(id).addEventListener("click", () => {
+      $("feedbackText").textContent = `You chose “${label}”. Feedback isn’t saved in this version.`;
+    });
+  }
+
+  resetReview();
+})();

@@ -1,6 +1,7 @@
 /**
- * Fan DRS Review - MV3 Service Worker (minimal for now)
- * Keeps a place for future opt-in "Accuracy Boost" server calls (with consent).
+ * Fan DRS Review - MV3 Service Worker.
+ * Install logging and a PING health check. The extension makes no network
+ * requests; capture and review run entirely in the YouTube tab.
  */
 chrome.runtime.onInstalled.addListener(() => {
   console.log("[FanDRS] Installed");
