@@ -341,6 +341,14 @@ test("validateRequest enforces version, id, type and keyframe bounds", () => {
   assert.equal(kf({ t0: 0, t1: 12, maxFrames: 61 }).reason, "BAD_MAX_FRAMES");
   assert.equal(kf({ t0: 0, t1: 12, maxFrames: 0 }).reason, "BAD_MAX_FRAMES");
   assert.equal(kf(undefined).reason, "BAD_WINDOW");
+  assert.equal(kf({ t0: 0, t1: 12, maxFrames: 48, includeImages: true }).ok, true);
+  assert.equal(kf({ t0: 0, t1: 12, maxFrames: 48, includeImages: "yes" }).reason, "BAD_INCLUDE_IMAGES");
+  const set = (payload) => Core.validateRequest(req({ type: "SET_CAPTURE", payload }));
+  assert.equal(set({ scope: "video", value: "on" }).ok, true);
+  assert.equal(set({ scope: "channel", value: null }).ok, true);
+  assert.equal(set({ scope: "tab", value: "on" }).reason, "BAD_SCOPE");
+  assert.equal(set({ scope: "video", value: true }).reason, "BAD_VALUE");
+  assert.equal(set(undefined).reason, "BAD_SCOPE");
 });
 
 test("validateInbound accepts only known responses and events", () => {
@@ -348,6 +356,7 @@ test("validateInbound accepts only known responses and events", () => {
   assert.equal(Core.validateInbound({ v, kind: "response", id: 3, ok: true }).ok, true);
   assert.equal(Core.validateInbound({ v, kind: "response", id: 3 }).reason, "BAD_RESPONSE");
   assert.equal(Core.validateInbound({ v, kind: "event", type: "CONTEXT_CHANGED" }).ok, true);
+  assert.equal(Core.validateInbound({ v, kind: "event", type: "REVIEW_REQUESTED" }).ok, true);
   assert.equal(Core.validateInbound({ v, kind: "event", type: "RUN" }).reason, "UNKNOWN_EVENT");
   assert.equal(Core.validateInbound({ v, kind: "event", type: "CAPTURE_ERROR" }).reason, "UNKNOWN_EVENT", "errors travel as context state");
   assert.equal(Core.validateInbound({ v: 9, kind: "event", type: "CONTEXT_CHANGED" }).reason, "BAD_ENVELOPE");

@@ -309,8 +309,8 @@
   // schema check is defense in depth against our own bugs, not the page.
   // ---------------------------------------------------------------------------
 
-  const REQUEST_TYPES = Object.freeze(["GET_CONTEXT", "GET_KEYFRAMES", "CLOSE"]);
-  const EVENT_TYPES = Object.freeze(["CONTEXT_CHANGED", "SESSION_RESET"]);
+  const REQUEST_TYPES = Object.freeze(["GET_CONTEXT", "GET_KEYFRAMES", "SET_CAPTURE", "CLOSE"]);
+  const EVENT_TYPES = Object.freeze(["CONTEXT_CHANGED", "SESSION_RESET", "REVIEW_REQUESTED"]);
 
   /**
    * The connect handshake is authenticated by a nonce that only the content
@@ -337,6 +337,12 @@
       const p = msg.payload;
       if (!p || !validateWindow(p).ok) return { ok: false, reason: "BAD_WINDOW" };
       if (!Number.isSafeInteger(p.maxFrames) || p.maxFrames < 1 || p.maxFrames > LIMITS.analysisMaxFrames) return { ok: false, reason: "BAD_MAX_FRAMES" };
+      if (p.includeImages !== undefined && typeof p.includeImages !== "boolean") return { ok: false, reason: "BAD_INCLUDE_IMAGES" };
+    }
+    if (msg.type === "SET_CAPTURE") {
+      const p = msg.payload;
+      if (!p || (p.scope !== "video" && p.scope !== "channel")) return { ok: false, reason: "BAD_SCOPE" };
+      if (p.value !== "on" && p.value !== "off" && p.value !== null) return { ok: false, reason: "BAD_VALUE" };
     }
     return { ok: true };
   }
