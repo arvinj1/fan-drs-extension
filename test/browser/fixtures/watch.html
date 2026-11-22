@@ -2,8 +2,15 @@
 <!--
   Minimal stand-in for a YouTube /watch page, served by the smoke harness at
   https://www.youtube.com/watch?v=... through request routing. It reproduces
-  only the selectors the content script reads. The clip is synthetic
-  (ffmpeg testsrc2), generated for this repository; no YouTube media is used.
+  only the selectors the content script reads.
+
+  Clips are synthetic, generated for this repository with ffmpeg:
+    clip.webm      testsrc2 pattern (not cricket)
+    stumping.webm  side-on stumping: crease at x=280-283, stumps at x=330/342/354,
+                   bail seated until t=6.0 s then off, batter's foot at x=230-257
+                   (beyond the crease). 480x270, 15 fps, 12 s.
+  No YouTube media is used. ?fx=stumping selects the stumping clip and a
+  cricket title on first load.
 -->
 <html>
 <head><meta charset="utf-8"><title>Fixture watch page</title></head>
@@ -12,25 +19,42 @@
     <video class="html5-main-video" muted playsinline width="640" height="360"></video>
   </div>
   <ytd-watch-metadata>
-    <h1 class="ytd-watch-metadata">Fixture: synthetic test pattern</h1>
+    <h1 class="ytd-watch-metadata"></h1>
   </ytd-watch-metadata>
-  <ytd-channel-name><a href="#">Fixture channel</a></ytd-channel-name>
+  <ytd-channel-name><a href="#"></a></ytd-channel-name>
+  <div id="description"></div>
   <div id="actions"><div id="top-level-buttons-computed"><button type="button">Like</button></div></div>
   <script>
-    // Routed responses don't support Range requests, so the clip is loaded as a
-    // blob to make seeking work like it does on YouTube.
-    const clipUrl = fetch("/fixture/clip.webm").then((r) => r.blob()).then((b) => URL.createObjectURL(b));
-    clipUrl.then((u) => (document.querySelector("video.html5-main-video").src = u));
+    const FIXTURES = {
+      pattern: { clip: "/fixture/clip.webm", title: "Fixture: synthetic test pattern", channel: "Fixture channel", description: "A test pattern." },
+      stumping: { clip: "/fixture/stumping.webm", title: "Lightning stumping | Cricket highlights", channel: "Fixture Cricket", description: "Synthetic stumping for tests." },
+    };
+    // Routed responses don't support Range requests, so clips are loaded as
+    // blobs to make seeking work like it does on YouTube.
+    const blobs = {};
+    const blobUrl = (path) => (blobs[path] ||= fetch(path).then((r) => r.blob()).then((b) => URL.createObjectURL(b)));
+
+    function applyMeta(fx) {
+      document.querySelector("h1.ytd-watch-metadata").textContent = fx.title;
+      document.querySelector("ytd-channel-name a").textContent = fx.channel;
+      document.getElementById("description").textContent = fx.description;
+    }
+
+    const first = FIXTURES[new URLSearchParams(location.search).get("fx")] || FIXTURES.pattern;
+    applyMeta(first);
+    blobUrl(first.clip).then((u) => (document.querySelector("video.html5-main-video").src = u));
 
     // Test hooks: simulate YouTube SPA navigation without a reload.
     // reuse: keep the same <video> and swap its source after the route change,
     //        the way YouTube does between watch pages.
     // crossOrigin: play a clip from another origin without CORS, which taints
     //        the canvas and makes capture fail with SecurityError.
-    window.fixtureNavigate = async (url, { withPlayer = true, reuse = false, crossOrigin = false } = {}) => {
+    window.fixtureNavigate = async (url, { withPlayer = true, reuse = false, crossOrigin = false, fx = "pattern" } = {}) => {
       history.pushState({}, "", url);
+      const meta = FIXTURES[fx];
+      applyMeta(meta);
       const player = document.getElementById("movie_player");
-      const src = crossOrigin ? "https://media.fixture.example/clip.webm" : await clipUrl;
+      const src = crossOrigin ? "https://media.fixture.example/clip.webm" : await blobUrl(meta.clip);
       if (!withPlayer) {
         player.replaceChildren();
       } else if (reuse && player.querySelector("video")) {

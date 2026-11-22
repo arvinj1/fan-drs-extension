@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
  * Browser smoke test: loads the real unpacked extension into Chromium and
- * drives it on a fixture page served at https://www.youtube.com/watch via
+ * drives it on fixture pages served at https://www.youtube.com/watch via
  * request routing, so the production manifest is used unchanged.
  *
  *   CHROME_PATH=/path/to/chrome-for-testing npm run smoke
  *
  * Branded Google Chrome ignores --load-extension; use Chrome for Testing or
- * Chromium. Screenshots go to test/browser/out/.
+ * Chromium. Screenshots and results.json go to test/browser/out/.
  */
 import { chromium } from "playwright-core";
 import fs from "node:fs";
@@ -49,13 +49,14 @@ const context = await chromium.launchPersistentContext(userDataDir, {
   viewport: { width: 1280, height: 800 },
   args: [`--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`, "--autoplay-policy=no-user-gesture-required"],
 });
+await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "https://www.youtube.com" });
 
 // Only the fixture's own URLs are expected; anything else is recorded.
 const unexpectedRequests = [];
-const FIXTURE_PATHS = new Set(["/", "/watch", "/fixture/clip.webm"]);
+const CLIPS = { "/fixture/clip.webm": "clip.webm", "/fixture/stumping.webm": "stumping.webm" };
 await context.route("https://www.youtube.com/**", (route) => {
   const url = new URL(route.request().url());
-  if (url.pathname === "/fixture/clip.webm") return route.fulfill({ path: path.join(fixtures, "clip.webm"), contentType: "video/webm" });
+  if (CLIPS[url.pathname]) return route.fulfill({ path: path.join(fixtures, CLIPS[url.pathname]), contentType: "video/webm" });
   if (url.pathname === "/watch" || url.pathname === "/") return route.fulfill({ path: path.join(fixtures, "watch.html"), contentType: "text/html" });
   return route.fulfill({ status: 404, body: "" });
 });
@@ -64,7 +65,7 @@ await context.route("https://media.fixture.example/**", (route) => route.fulfill
 context.on("request", (req) => {
   const u = new URL(req.url());
   const expected =
-    (u.origin === "https://www.youtube.com" && FIXTURE_PATHS.has(u.pathname)) ||
+    (u.origin === "https://www.youtube.com" && (u.pathname === "/" || u.pathname === "/watch" || CLIPS[u.pathname])) ||
     u.href === "https://media.fixture.example/clip.webm" ||
     u.protocol === "chrome-extension:" ||
     u.protocol === "data:" ||
@@ -72,266 +73,304 @@ context.on("request", (req) => {
   if (!expected) unexpectedRequests.push(u.href);
 });
 
-const page = await context.newPage();
 const consoleErrors = [];
-page.on("pageerror", (e) => consoleErrors.push(`page: ${e.message}`));
-page.on("console", (m) => m.type() === "error" && consoleErrors.push(`console: ${m.text()}`));
+function watchErrors(p) {
+  p.on("pageerror", (e) => consoleErrors.push(`page: ${e.message}`));
+  p.on("console", (m) => m.type() === "error" && consoleErrors.push(`console: ${m.text()}`));
+}
 
-// The panel iframe lives in a closed shadow root, so find it by URL.
-const sidebarOf = (p) => {
-  const frame = p.frames().find((f) => f.url().includes("/src/sidebar/sidebar.html"));
-  if (!frame) throw new Error("sidebar frame not found");
-  return frame;
-};
-const panel = () => sidebarOf(page);
-async function waitForSidebar(p) {
+const page = await context.newPage();
+watchErrors(page);
+
+async function waitForCard(p) {
   for (let i = 0; i < 50; i++) {
     const f = p.frames().find((x) => x.url().includes("/src/sidebar/sidebar.html"));
     if (f) return f;
     await p.waitForTimeout(100);
   }
-  throw new Error("sidebar frame not found");
+  throw new Error("card frame not found");
 }
-const text = (sel) => panel().locator(sel).innerText();
-const play = (seconds) => page.evaluate(async (s) => {
-  const v = document.querySelector("video.html5-main-video");
-  await v.play();
-  await new Promise((r) => setTimeout(r, s * 1000));
-}, seconds);
+// The card iframe lives in a closed shadow root, so find it by URL.
+const card = () => {
+  const f = page.frames().find((x) => x.url().includes("/src/sidebar/sidebar.html"));
+  if (!f) throw new Error("card frame not found");
+  return f;
+};
+const text = (sel) => card().locator(sel).innerText();
+const chip = () => page.locator("#fan-drs-btn").innerText();
+const video = (fn, arg) => page.evaluate(fn, arg);
+const play = (seconds) =>
+  video(async (s) => {
+    const v = document.querySelector("video.html5-main-video");
+    await v.play();
+    await new Promise((r) => setTimeout(r, s * 1000));
+  }, seconds);
+const seekTo = (t) => video((x) => (document.querySelector("video.html5-main-video").currentTime = x), t);
+const waitVerdict = (re, timeout = 6000) => card().locator("#verdict", { hasText: re }).waitFor({ timeout });
+const bracketTimes = async () => {
+  const m = /Between (\d+):(\d+\.\d+) \(bail on\) and (\d+):(\d+\.\d+) \(bail off\), (\d+) ms/.exec(await text("#bracketText"));
+  return m ? { on: +m[1] * 60 + +m[2], off: +m[3] * 60 + +m[4], gap: +m[5] } : null;
+};
 
-await page.goto("https://www.youtube.com/watch?v=fixtureA");
+// ---------------------------------------------------------------------------
+// Capture policy and chip
+// ---------------------------------------------------------------------------
 
-await step("button mounts once; handle hidden before first open", async () => {
+await page.goto("https://www.youtube.com/watch?v=pattern1");
+
+await step("non-cricket video: chip says DRS off and nothing is captured", async () => {
   await page.waitForSelector("#fan-drs-btn");
-  await page.evaluate(() => document.body.appendChild(document.createElement("div"))); // trigger observer
-  await page.waitForTimeout(100);
-  expect((await page.locator("#fan-drs-btn").count()) === 1, "expected one button");
-  expect((await page.locator("#fan-drs-sidebar-host").count()) === 0, "panel should be created lazily");
-});
-
-await step("panel opens, connects, and shows live context", async () => {
-  await page.click("#fan-drs-btn");
-  await waitForSidebar(page);
-  await panel().locator("#ctxTitle", { hasText: "Fixture: synthetic test pattern" }).waitFor({ timeout: 5000 });
-  expect((await page.getAttribute("#fan-drs-btn", "aria-expanded")) === "true", "aria-expanded not updated");
-  await play(3);
-  const time = await text("#ctxTime");
-  expect(/^0:0[2-4] \/ 0:20$/.test(time), `unexpected time text: ${time}`);
-});
-
-await step("Analyze returns real frames, coverage and an inconclusive evidence result", async () => {
-  await panel().locator("#btnAnalyze").click();
-  await panel().locator("#verdictValue", { hasText: "INCONCLUSIVE" }).waitFor({ timeout: 4000 });
-  const meter = await text("#meterValue");
-  const frames = Number(/· (\d+) frame/.exec(meter)?.[1]);
-  expect(frames >= 8, `expected >= 8 frames, got ${meter}`);
-  const ticks = await panel().locator("#timelineBar .tick").count();
-  expect(ticks === frames, `timeline ticks ${ticks} != frames ${frames}`);
-  expect((await text("#windowText")).startsWith("Last 12 seconds: 0:00.00 →"), "window should clamp to zero");
-  expect(!/\d+%\s*$/.test(await text("#modePill")), "no confidence percentage");
-  await page.screenshot({ path: path.join(outDir, "01-evidence.png") });
-});
-
-await step("marks set from fresh playback time; reversed marks are explained", async () => {
-  await page.evaluate(() => document.querySelector("video.html5-main-video").pause());
-  await page.evaluate(() => (document.querySelector("video.html5-main-video").currentTime = 4));
-  await page.waitForTimeout(200);
-  await panel().locator("#btnMarkEnd").click();
-  await page.evaluate(() => (document.querySelector("video.html5-main-video").currentTime = 6));
-  await page.waitForTimeout(200);
-  await panel().locator("#btnMarkStart").click();
-  await panel().locator("#markStartValue", { hasText: "0:06.00" }).waitFor({ timeout: 2000 });
-  expect((await text("#markEndValue")) === "0:04.00", `end mark ${await text("#markEndValue")}`);
-  expect((await text("#markStartValue")) === "0:06.00", `start mark ${await text("#markStartValue")}`);
-  await panel().locator("#windowText", { hasText: "at or before the start mark" }).waitFor({ timeout: 2000 });
-  await panel().locator("#btnAnalyze").click();
-  await panel().locator("#statusText", { hasText: "at or before the start mark" }).waitFor({ timeout: 2000 });
-  await panel().locator("#btnClearMarks").click();
-  expect((await text("#markStartValue")) === "Not set", "marks not cleared");
-});
-
-await step("window before capture reports a gap instead of guessing", async () => {
-  await panel().locator("#btnReset").click();
-  await page.evaluate(() => (document.querySelector("video.html5-main-video").currentTime = 2));
-  await page.waitForTimeout(150);
-  await panel().locator("#btnMarkStart").click();
-  await panel().locator("#markStartValue", { hasText: "0:02.00" }).waitFor({ timeout: 2000 });
-  await page.evaluate(() => (document.querySelector("video.html5-main-video").currentTime = 18));
-  await page.waitForTimeout(150);
-  await panel().locator("#btnMarkEnd").click();
-  await panel().locator("#markEndValue", { hasText: "0:18.00" }).waitFor({ timeout: 2000 });
-  expect((await text("#windowText")).startsWith("Marked window: 0:02.00 → 0:18.00"), await text("#windowText"));
-  await panel().locator("#btnAnalyze").click();
-  await panel().locator("#verdictValue", { hasText: /INCONCLUSIVE|NO EVIDENCE/ }).waitFor({ timeout: 3000 }).catch(() => {});
-  const why = await text("#whyBullets");
-  const status = await text("#statusText");
-  expect(/Missing footage/.test(why), `why: ${why} | status: ${status} | window: ${await text("#windowText")}`);
-  expect((await panel().locator("#timelineBar .gap").count()) >= 1, "gap not drawn");
-});
-
-await step("Reset clears marks, results and timeline", async () => {
-  await panel().locator("#btnReset").click();
-  expect((await text("#verdictValue")) === "—", "verdict not reset");
-  expect((await text("#markEndValue")) === "Not set", "marks not reset");
-  expect((await panel().locator("#timelineBar > *").count()) === 0, "timeline not cleared");
-});
-
-// Supersede/cancel ordering is proven in unit tests; here we only check the UI ends clean.
-await step("Reset during an analysis leaves a clean panel", async () => {
-  await panel().locator("#btnAnalyze").click();
-  await panel().locator("#btnReset").click();
-  await page.waitForTimeout(800);
-  expect((await text("#verdictValue")) === "—", `late result rendered: ${await text("#verdictValue")}`);
-});
-
-await step("page scripts can't reach the panel iframe or send commands to the content script", async () => {
-  const seen = await page.evaluate(() => {
-    window.postMessage({ __fanDRS: true, type: "CLOSE_REQUEST" }, "*");
-    const host = document.getElementById("fan-drs-sidebar-host");
-    return { iframeInDom: Boolean(document.querySelector("iframe")), shadowRoot: host.shadowRoot };
-  });
-  await page.waitForTimeout(400);
-  expect(!seen.iframeInDom && seen.shadowRoot === null, `page can see the iframe: ${JSON.stringify(seen)}`);
-  expect((await page.getAttribute("#fan-drs-btn", "aria-expanded")) === "true", "page closed the panel");
-});
-
-await step("close stops capture, shows the handle, and returns focus; reopen keeps frames", async () => {
-  await panel().locator("#btnClose").click();
-  await page.waitForFunction(() => document.getElementById("fan-drs-handle").style.display === "block");
-  const focused = await page.evaluate(() => document.activeElement?.id);
-  expect(focused === "fan-drs-btn", `focus went to ${focused}`);
-  const before = await page.evaluate(() => document.querySelector("video.html5-main-video").currentTime);
-  await page.click("#fan-drs-handle");
-  await panel().locator("#bufferText", { hasText: "Capturing" }).waitFor({ timeout: 3000 });
-  const buffered = Number(/(\d+) frames/.exec(await text("#bufferText"))?.[1]);
-  expect(buffered > 0, `frames lost on reopen (t=${before})`);
-});
-
-// Loop stacking is covered by unit tests; this checks capture still works after churn.
-await step("capture keeps working after repeated open/close", async () => {
-  for (let i = 0; i < 6; i++) {
-    await panel().locator("#btnClose").click();
-    await page.click("#fan-drs-handle");
-  }
-  await panel().locator("#btnReset").click();
   await play(1.5);
-  await panel().locator("#btnAnalyze").click();
-  await panel().locator("#verdictValue", { hasText: "INCONCLUSIVE" }).waitFor({ timeout: 3000 });
-  const frames = Number(/· (\d+) frame/.exec(await text("#meterValue"))?.[1]);
-  expect(frames >= 4, `expected fresh frames after churn, got ${frames}`);
+  await page.locator("#fan-drs-btn", { hasText: "DRS off" }).waitFor({ timeout: 3000 });
+  expect((await page.locator("#fan-drs-btn").count()) === 1, "expected one chip");
 });
 
-await step("watch-to-watch navigation clears frames and marks", async () => {
-  await panel().locator("#btnMarkStart").click();
-  await page.evaluate(() => window.fixtureNavigate("/watch?v=fixtureB"));
-  await panel().locator("#statusText", { hasText: "New video" }).waitFor({ timeout: 3000 });
-  expect((await text("#markStartValue")) === "Not set", "marks survived navigation");
+await step("chip on a non-cricket video turns capture on and opens the card honestly", async () => {
+  await page.click("#fan-drs-btn");
+  await waitForCard(page);
+  await card().locator("#capturePill", { hasText: "on for this video" }).waitFor({ timeout: 4000 });
+  await waitVerdict("NO FRAMES");
+  expect(/replay the moment/i.test(await text("#reasons")), await text("#reasons"));
+  await page.locator("#fan-drs-btn", { hasText: "DRS ready" }).waitFor({ timeout: 3000 });
 });
 
-await step("same <video> reused across navigation clears old frames and marks", async () => {
+await step("capture keeps running with the card closed", async () => {
+  await card().locator("#btnClose").click();
+  await page.waitForFunction(() => document.activeElement?.id === "fan-drs-btn", null, { timeout: 3000 }).catch(async () => {
+    throw new Error(`focus on ${await page.evaluate(() => `${document.activeElement?.tagName}#${document.activeElement?.id} expanded=${document.getElementById("fan-drs-btn")?.getAttribute("aria-expanded")}`)}`);
+  });
+  await play(1.5);
+  await page.locator("#fan-drs-btn", { hasText: "DRS ready" }).waitFor();
+});
+
+await step("remembering a channel applies to its other videos", async () => {
+  await page.click("#fan-drs-btn");
+  await card().locator("#rememberChannel").check();
+  await card().locator("#rememberLabel", { hasText: "Fixture channel" }).waitFor();
+  await page.evaluate(() => window.fixtureNavigate("/watch?v=pattern2"));
+  await page.locator("#fan-drs-btn", { hasText: "DRS ready" }).waitFor({ timeout: 4000 });
+  await card().locator("#capturePill", { hasText: "on for this channel" }).waitFor({ timeout: 4000 });
+  await card().locator("#rememberChannel").uncheck();
+  await card().locator("#capturePill", { hasText: "not detected as cricket" }).waitFor({ timeout: 4000 });
+  await card().locator("#btnClose").click();
+});
+
+// ---------------------------------------------------------------------------
+// Review on the synthetic stumping
+// ---------------------------------------------------------------------------
+
+await step("cricket video: capture starts by itself", async () => {
+  await page.evaluate(() => window.fixtureNavigate("/watch?v=stump1", { fx: "stumping" }));
+  await page.locator("#fan-drs-btn", { hasText: "DRS ready" }).waitFor({ timeout: 4000 });
+  await seekTo(0);
+  await play(8.6);
+  await video(() => document.querySelector("video.html5-main-video").pause());
+});
+
+await step("chip review detects the bail-off interval at the scripted 6.0 s", async () => {
+  await page.click("#fan-drs-btn");
+  await card().locator("#windowLabel", { hasText: "from the DRS button" }).waitFor({ timeout: 4000 });
+  await waitVerdict(/INCONCLUSIVE|OUT/);
+  const b = await bracketTimes();
+  expect(b, `no bracket: ${await text("#bracketText")}`);
+  expect(b.on < 6.0 && b.off >= 6.0 && b.off - b.on <= 0.4, `bracket ${JSON.stringify(b)}`);
+  expect(/detected automatically/.test(await text("#bracketText")) && !/%/.test(await text("#bracketText")), await text("#bracketText"));
+  await page.screenshot({ path: path.join(outDir, "01-review.png") });
+});
+
+await step("crease is found near the painted line; the hint says not behind", async () => {
+  expect(/Detected/.test(await text("#creaseText")), await text("#creaseText"));
+  const x = await card().evaluate(() => {
+    const l = document.querySelector("#stageOverlay line");
+    return l ? (+l.getAttribute("x1") + +l.getAttribute("x2")) / 2 : null;
+  });
+  expect(x !== null && Math.abs(x - 281.5) <= 4, `crease x ${x}`);
+  expect(/not behind/.test(await text("#hintText")), await text("#hintText"));
+});
+
+await step("verdict follows the viewer's grounding answer", async () => {
+  await waitVerdict("INCONCLUSIVE");
+  expect(/hasn’t been confirmed/.test(await text("#reasons")), await text("#reasons"));
+  await card().locator('input[value="not-behind"]').check();
+  await waitVerdict(/^OUT$/);
+  await card().locator('input[value="behind"]').check();
+  await waitVerdict("NOT OUT");
+  await card().locator('input[value="cant-see"]').check();
+  await waitVerdict("INCONCLUSIVE");
+  expect(/can’t be seen/.test(await text("#reasons")), await text("#reasons"));
+  await card().locator('input[value="not-behind"]').check();
+  await waitVerdict(/^OUT$/);
+  await page.screenshot({ path: path.join(outDir, "02-out.png") });
+});
+
+await step("copy evidence produces a packet that matches the card", async () => {
+  await card().locator("#btnCopy").click();
+  await card().locator("#statusText", { hasText: /Evidence copied|Copying was blocked/ }).waitFor({ timeout: 3000 });
+  const raw = (await text("#statusText")).includes("copied") ? await page.evaluate(() => navigator.clipboard.readText()) : await card().locator("#packetFallback").inputValue();
+  const p = JSON.parse(raw);
+  expect(p.schema === "fan-drs.evidence/1", p.schema);
+  expect(p.video.id === "stump1" && p.video.title.includes("stumping"), JSON.stringify(p.video));
+  expect(p.verdict.call === "OUT", p.verdict.call);
+  expect(p.grounded.value === "not-behind" && p.grounded.source === "viewer", JSON.stringify(p.grounded));
+  expect(p.bracket.lastOn.t < 6 && p.bracket.firstOff.t >= 6 && p.bracket.source === "detector", JSON.stringify(p.bracket));
+  expect(Math.abs((p.crease.line.x1 + p.crease.line.x2) / 2 - 281.5 / 480) < 0.01, JSON.stringify(p.crease));
+  expect(!raw.includes("base64"), "packet contains image data");
+});
+
+await step("the viewer can override the bracket and set the crease with two clicks", async () => {
+  await card().locator("#strip").focus();
+  await page.keyboard.press("Home");
+  await page.keyboard.press("ArrowRight");
+  await card().locator("#btnSetOff").click();
+  expect(/set by you/.test(await text("#bracketText")), await text("#bracketText"));
+  await card().locator("#btnSetCrease").click();
+  const box = await card().locator("#stageImg").boundingBox();
+  const sx = box.width / 480;
+  await card().locator("#stageBox").click({ position: { x: 300 * sx, y: 80 * sx } });
+  await card().locator("#stageBox").click({ position: { x: 300 * sx, y: 250 * sx } });
+  await card().locator("#creaseText", { hasText: "Set by you" }).waitFor({ timeout: 2000 });
+  const x = await card().evaluate(() => {
+    const l = document.querySelector("#stageOverlay line");
+    return (+l.getAttribute("x1") + +l.getAttribute("x2")) / 2;
+  });
+  expect(Math.abs(x - 300) <= 3, `viewer crease x ${x}`);
+});
+
+await step("replay gesture: seek back and pause opens a fresh review", async () => {
+  await card().locator("#btnClose").click();
+  await seekTo(9);
+  await play(0.8);
+  await seekTo(6.4);
+  await play(0.6);
+  await video(() => document.querySelector("video.html5-main-video").pause());
+  await card().locator("#windowLabel", { hasText: "from your replay pause" }).waitFor({ timeout: 4000 });
+  await waitVerdict(/INCONCLUSIVE|OUT/);
+  expect((await page.getAttribute("#fan-drs-btn", "aria-expanded")) === "true", "card not open");
+});
+
+await step("a plain pause does not open anything", async () => {
+  await card().locator("#btnClose").click();
   await play(1);
-  await panel().locator("#btnMarkStart").click();
-  await panel().locator("#markStartValue", { hasText: /\d:\d\d\.\d\d/ }).waitFor({ timeout: 2000 });
-  await page.evaluate(() => (document.querySelector("video.html5-main-video").dataset.reuseMarker = "1"));
-  await page.evaluate(() => window.fixtureNavigate("/watch?v=fixtureReuse", { reuse: true }));
-  await panel().locator("#statusText", { hasText: "cleared" }).waitFor({ timeout: 3000 });
-  expect((await text("#markStartValue")) === "Not set", "marks survived");
-  const sameElement = await page.evaluate(() => document.querySelector("video.html5-main-video").dataset.reuseMarker === "1");
-  expect(sameElement, "fixture did not reuse the element");
+  await video(() => document.querySelector("video.html5-main-video").pause());
+  await page.waitForTimeout(600);
+  expect((await page.getAttribute("#fan-drs-btn", "aria-expanded")) === "false", "card opened on a plain pause");
 });
 
-await step("a source change on the same URL clears marks set while paused", async () => {
-  await page.evaluate(() => document.querySelector("video.html5-main-video").pause());
-  await panel().locator("#btnReset").click();
-  await panel().locator("#btnMarkStart").click();
-  await panel().locator("#markStartValue", { hasText: /\d:\d\d\.\d\d/ }).waitFor({ timeout: 2000 });
-  await page.evaluate(() => window.fixtureNavigate(location.pathname + location.search, { reuse: true }));
-  await panel().locator("#statusText", { hasText: "source changed" }).waitFor({ timeout: 3000 });
-  expect((await text("#markStartValue")) === "Not set", "paused marks survived a source change");
+await step("keyboard shortcut command reviews the current moment", async () => {
+  const [sw] = context.serviceWorkers().length ? context.serviceWorkers() : [await context.waitForEvent("serviceworker")];
+  await sw.evaluate(async () => {
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs) await chrome.tabs.sendMessage(t.id, { fanDRS: "review" }).catch(() => {});
+  });
+  await card().locator("#windowLabel", { hasText: "keyboard shortcut" }).waitFor({ timeout: 4000 });
 });
 
-await step("missing player is announced once, then recovered when the player appears", async () => {
-  await page.evaluate(() => window.fixtureNavigate("/watch?v=fixtureC", { withPlayer: false }));
-  await panel().locator("#ctxTime", { hasText: "No player found" }).waitFor({ timeout: 3000 });
-  await panel().locator("#statusText", { hasText: "player went away" }).waitFor({ timeout: 2000 });
-  // A repeated reset would overwrite this sentinel on the next 500 ms tick.
-  await panel().evaluate(() => (document.getElementById("statusText").textContent = "SENTINEL"));
-  await page.waitForTimeout(1600);
-  expect((await text("#statusText")) === "SENTINEL", `status was rewritten: ${await text("#statusText")}`);
-  await panel().locator("#btnAnalyze").click();
-  await panel().locator("#statusText", { hasText: "No YouTube player" }).waitFor({ timeout: 2000 });
-  await page.evaluate(() => window.fixtureNavigate("/watch?v=fixtureC"));
-  await panel().locator("#btnAnalyze").click();
-  await panel().locator("#statusText", { hasText: "Play the video past the moment" }).waitFor({ timeout: 3000 });
-  await panel().locator("#ctxTime", { hasText: "/ 0:20" }).waitFor({ timeout: 4000 });
+await step("keyboard: strip arrows move the selection, Escape closes", async () => {
+  await waitVerdict(/INCONCLUSIVE|OUT/);
+  await card().locator("#strip").focus();
+  await page.keyboard.press("End");
+  const last = await text("#stageCaption");
+  await page.keyboard.press("ArrowLeft");
+  expect((await text("#stageCaption")) !== last, "arrow did not move");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.getElementById("fan-drs-btn").getAttribute("aria-expanded") === "false");
 });
 
-await step("keyboard: tab order reaches Analyze and Enter activates it", async () => {
-  await play(1);
-  const frame = page.frame({ url: /sidebar\.html/ });
-  await frame.focus("#btnReset");
-  await page.keyboard.press("Shift+Tab");
-  const id = await frame.evaluate(() => document.activeElement.id);
-  expect(id === "btnAnalyze", `focus on ${id}`);
-  await page.keyboard.press("Enter");
-  await panel().locator("#statusText", { hasText: /Collected \d+ frames/ }).waitFor({ timeout: 3000 });
-});
-
-await step("narrow viewport: panel fits within 390px", async () => {
+await step("narrow viewport: card fits within 390px", async () => {
+  await page.click("#fan-drs-btn");
+  await waitVerdict(/INCONCLUSIVE|OUT|NO FRAMES/);
   await page.setViewportSize({ width: 390, height: 844 });
-  const box = await page.locator("#fan-drs-sidebar-host").boundingBox();
-  expect(box && box.width <= 390 && box.x >= 0, `panel box ${JSON.stringify(box)}`);
-  await page.screenshot({ path: path.join(outDir, "02-narrow.png") });
+  const box = await page.evaluate(() => {
+    const host = [...document.documentElement.children].find((el) => el.getAttribute("aria-label") === "Fan DRS Review");
+    const r = host.getBoundingClientRect();
+    return { x: r.x, width: r.width };
+  });
+  expect(box.width <= 390 && box.x >= 0, `card box ${JSON.stringify(box)}`);
+  await page.screenshot({ path: path.join(outDir, "03-narrow.png") });
   await page.setViewportSize({ width: 1280, height: 800 });
 });
 
-await step("leaving watch removes all injected UI", async () => {
-  await page.evaluate(() => window.fixtureNavigate("/", { withPlayer: false }));
-  await page.waitForFunction(() => !document.getElementById("fan-drs-btn") && !document.getElementById("fan-drs-sidebar-host") && !document.getElementById("fan-drs-handle"), null, { timeout: 3000 });
+// ---------------------------------------------------------------------------
+// Lifecycle and security (carried from A1)
+// ---------------------------------------------------------------------------
+
+await step("watch-to-watch navigation clears the review", async () => {
+  await page.evaluate(() => window.fixtureNavigate("/watch?v=stump2", { fx: "stumping" }));
+  await card().locator("#statusText", { hasText: "New video" }).waitFor({ timeout: 3000 });
+  expect(await card().locator("#reviewView").isHidden(), "review still shown");
 });
 
-await step("a page that spams fake connects before the panel exists can't take it over", async () => {
+await step("same <video> reused across navigation clears the review", async () => {
+  await play(1);
+  await page.click("#fan-drs-btn");
+  await waitVerdict(/INCONCLUSIVE|OUT|NO FRAMES/);
+  await page.evaluate(() => (document.querySelector("video.html5-main-video").dataset.reuseMarker = "1"));
+  await page.evaluate(() => window.fixtureNavigate("/watch?v=stump3", { reuse: true, fx: "stumping" }));
+  await card().locator("#statusText", { hasText: "cleared" }).waitFor({ timeout: 3000 });
+  expect(await page.evaluate(() => document.querySelector("video.html5-main-video").dataset.reuseMarker === "1"), "fixture did not reuse the element");
+});
+
+await step("missing player is announced once", async () => {
+  await page.evaluate(() => window.fixtureNavigate("/watch?v=noplayer", { withPlayer: false }));
+  await card().locator("#capturePill", { hasText: "No player found" }).waitFor({ timeout: 3000 });
+  await card().locator("#statusText", { hasText: "player went away" }).waitFor({ timeout: 2000 });
+  await card().evaluate(() => (document.getElementById("statusText").textContent = "SENTINEL"));
+  await page.waitForTimeout(1600);
+  expect((await text("#statusText")) === "SENTINEL", `status was rewritten: ${await text("#statusText")}`);
+});
+
+await step("page scripts can't reach the card iframe or send commands to the content script", async () => {
+  const seen = await page.evaluate(() => {
+    window.postMessage({ __fanDRS: true, type: "CLOSE_REQUEST" }, "*");
+    const host = [...document.documentElement.children].find((el) => el.getAttribute("aria-label") === "Fan DRS Review");
+    return { iframeInDom: Boolean(document.querySelector("iframe")), shadowRoot: host.shadowRoot, frames: window.length };
+  });
+  expect(!seen.iframeInDom && seen.shadowRoot === null && seen.frames === 0, `page can see the iframe: ${JSON.stringify(seen)}`);
+});
+
+await step("a page that spams fake connects before the card exists can't take it over", async () => {
   const hostile = await context.newPage();
+  watchErrors(hostile);
   await hostile.addInitScript(() => {
-    // Every child frame, every millisecond, from before the panel is created.
     setInterval(() => {
       for (let i = 0; i < window.frames.length; i++) {
         const ch = new MessageChannel();
-        ch.port1.onmessage = (ev) => {
-          if (ev.data && ev.data.type === "GET_CONTEXT") ch.port1.postMessage({ v: 1, kind: "response", id: ev.data.id, ok: true, payload: { title: "SPOOFED BY PAGE", hasPlayer: true, currentTime: 1, duration: 20, capture: { running: true, generation: 1, bufferedFrames: 999 } } });
-        };
-        ch.port1.postMessage({ v: 1, kind: "event", type: "CONTEXT_CHANGED", payload: { title: "SPOOFED BY PAGE", capture: { bufferedFrames: 999 } } });
+        ch.port1.postMessage({ v: 1, kind: "event", type: "CONTEXT_CHANGED", payload: { title: "SPOOFED BY PAGE", hasPlayer: true, capture: { on: true, reason: "CRICKET", bufferedFrames: 999 } } });
         try { window.frames[i].postMessage({ fanDRS: "connect", v: 1 }, "*", [ch.port2]); } catch {}
         try { window.frames[i].postMessage({ fanDRS: "connect", v: 1, nonce: "guess" }, "*", [new MessageChannel().port2]); } catch {}
       }
     }, 1);
   });
-  await hostile.goto("https://www.youtube.com/watch?v=fixtureH");
+  await hostile.goto("https://www.youtube.com/watch?v=stumpH&fx=stumping");
   await hostile.waitForSelector("#fan-drs-btn");
   await hostile.click("#fan-drs-btn");
-  const frame = await waitForSidebar(hostile);
-  await frame.locator("#ctxTitle", { hasText: "Fixture: synthetic test pattern" }).waitFor({ timeout: 5000 });
+  const frame = await waitForCard(hostile);
+  await frame.locator("#capturePill", { hasText: "Capturing" }).waitFor({ timeout: 5000 });
   await hostile.waitForTimeout(800);
-  expect((await frame.locator("#ctxTitle").innerText()) === "Fixture: synthetic test pattern", "title was spoofed");
-  expect(!/999/.test(await frame.locator("#bufferText").innerText()), "buffer count was spoofed");
+  expect(!/999/.test(await frame.locator("#capturePill").innerText()), "capture state was spoofed");
   await hostile.close();
 });
 
-await step("blocked capture is shown on first open, even before the panel connects", async () => {
+await step("blocked capture is shown, even when it happens before the card connects", async () => {
   const p = await context.newPage();
-  await p.goto("https://www.youtube.com/watch?v=fixtureX");
-  await p.evaluate(() => window.fixtureNavigate("/watch?v=fixtureX", { crossOrigin: true }));
+  watchErrors(p);
+  await p.goto("https://www.youtube.com/watch?v=xo1");
+  await p.evaluate(() => window.fixtureNavigate("/watch?v=xo1", { crossOrigin: true, fx: "stumping" }));
   await p.evaluate(() => document.querySelector("video.html5-main-video").play());
   await p.waitForSelector("#fan-drs-btn");
+  await p.waitForTimeout(1200);
   await p.click("#fan-drs-btn");
-  const frame = await waitForSidebar(p);
-  await frame.locator("#bufferText", { hasText: "Blocked" }).waitFor({ timeout: 5000 }).catch(async (err) => {
-    const v = await p.evaluate(() => { const el = document.querySelector("video.html5-main-video"); return { rs: el.readyState, paused: el.paused, t: el.currentTime, src: el.src, err: el.error && el.error.code }; });
-    throw new Error(`${err.message.split("\n")[0]} | buffer: ${await frame.locator("#bufferText").innerText()} | video: ${JSON.stringify(v)}`);
+  const frame = await waitForCard(p);
+  await frame.locator("#capturePill", { hasText: "Blocked" }).waitFor({ timeout: 5000 }).catch(async (err) => {
+    const v = await p.evaluate(() => { const el = document.querySelector("video.html5-main-video"); return { rs: el.readyState, paused: el.paused, t: el.currentTime, err: el.error && el.error.code, w: el.videoWidth }; });
+    throw new Error(`${err.message.split("\n")[0]} | pill: ${await frame.locator("#capturePill").innerText()} | video: ${JSON.stringify(v)}`);
   });
-  await frame.locator("#btnReset").click();
-  expect(/Blocked/.test(await frame.locator("#bufferText").innerText()), "Reset hid the capture error");
   await p.close();
+});
+
+await step("leaving watch removes all injected UI", async () => {
+  await page.evaluate(() => window.fixtureNavigate("/", { withPlayer: false }));
+  await page.waitForFunction(() => !document.getElementById("fan-drs-btn") && ![...document.documentElement.children].some((el) => el.getAttribute("aria-label") === "Fan DRS Review" || el.textContent === "DRS"), null, { timeout: 3000 });
 });
 
 await step("no network traffic beyond the page and the extension", async () => {
@@ -339,7 +378,7 @@ await step("no network traffic beyond the page and the extension", async () => {
 });
 
 await step("no page or console errors", async () => {
-  const relevant = consoleErrors.filter((e) => !/favicon|404/.test(e));
+  const relevant = consoleErrors.filter((e) => !/favicon|404|SecurityError|tainted/.test(e));
   expect(relevant.length === 0, relevant.join(" | "));
 });
 

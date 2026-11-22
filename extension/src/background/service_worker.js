@@ -14,3 +14,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   return false;
 });
+
+// Alt+Shift+R (changeable in chrome://extensions/shortcuts) asks the YouTube tab
+// to review the last 12 seconds. Tabs without the content script just ignore it.
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command !== "review-moment" || !tab || tab.id === undefined) return;
+  chrome.tabs.sendMessage(tab.id, { fanDRS: "review" }).catch(() => {});
+});
