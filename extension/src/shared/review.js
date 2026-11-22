@@ -5,7 +5,7 @@
  *   - does this video look like cricket, and should capture run?
  *   - was that pause a "replay" gesture?
  *   - is a bail-off bracket valid evidence?
- *   - what's the verdict, and why?
+ *   - what did the viewer confirm, and what stays unknown? (no OUT / NOT OUT in the beta)
  *   - the evidence packet (schema fan-drs.evidence/1), the record a future
  *     assistant answers from.
  * See docs/SPEC.md sections 4 and 5.
@@ -132,7 +132,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Evidence and verdict
+  // Evidence and finding
   // ---------------------------------------------------------------------------
 
   /**
@@ -153,47 +153,65 @@
     return { valid: problems.length === 0, gapMs, sameShot, problems };
   }
 
-  const ASSUMPTIONS = Object.freeze([
-    "The delivery was legal (a no-ball can’t be ruled out from these frames).",
-    "The keeper put the wicket down with the ball in hand or with the ball.",
-    "The camera angle shows the popping crease at the point of contact.",
+  // What a frame strip can never settle about a stumping (MCC Laws 29, 30, 39).
+  // Always reported, whatever the viewer confirms.
+  const NOT_ESTABLISHED = Object.freeze([
+    "Whether the delivery was legal (a no-ball can’t be ruled out from these frames).",
+    "Whether the keeper put the wicket down fairly, with the ball, and without another fielder involved.",
+    "Whether the batter was attempting a run (that would make it a run out, not a stumping).",
   ]);
 
-  const REASON_TEXT = Object.freeze({
-    NO_BRACKET: "The moment the wicket broke wasn’t found. Pick the first frame where a bail is off.",
+  const OPEN_TEXT = Object.freeze({
+    NO_BRACKET: "The moment the wicket broke hasn’t been found. Mark the last frame with the bails on and the first with a bail off.",
+    UNCONFIRMED_BRACKET: "A possible bail-off was detected but hasn’t been confirmed. Something over the bails (a glove, say) can look the same, so check both frames.",
     BRACKET_ORDER: "The bail-off frame must come after the last bail-on frame.",
     CUT_IN_BRACKET: "There’s a camera cut between the bail-on and bail-off frames, so they don’t show one continuous moment.",
     BRACKET_TOO_WIDE: "The bail-on and bail-off frames are too far apart to pin down the moment the wicket broke.",
     NO_CREASE: "The popping crease hasn’t been located, so being in or out of ground can’t be judged.",
-    GROUNDING_UNKNOWN: "Whether bat or body was grounded behind the crease in the bail-on and bail-off frames hasn’t been confirmed.",
-    GROUNDING_NOT_VISIBLE: "The two frames either disagree about bat and feet or don’t show them clearly, so the moment can’t be settled.",
+    GROUNDING_UNKNOWN: "Whether bat or body was grounded behind the crease in the bail-on and bail-off frames hasn’t been answered.",
+    GROUNDING_NOT_VISIBLE: "The two frames either disagree about bat and feet or don’t show them clearly.",
   });
 
-  /**
-   * The verdict rule (SPEC 4.5). grounded is the viewer's answer about BOTH
-   * bracket frames: 'behind' (behind in both) | 'not-behind' (not behind in
-   * both) | 'cant-see' (they differ, or can't be seen) | null.
-   * hasCrease: the crease is located (detected or set by the viewer).
-   */
-  function decideVerdict(bracketCheck, grounded, { hasCrease = false } = {}) {
-    const codes = [...bracketCheck.problems];
-    if (!hasCrease) codes.push("NO_CREASE");
-    if (grounded === "cant-see") codes.push("GROUNDING_NOT_VISIBLE");
-    else if (grounded !== "behind" && grounded !== "not-behind") codes.push("GROUNDING_UNKNOWN");
+  const defaultTime = (t) => `${t.toFixed(2)} s`;
 
-    if (codes.length === 0) {
-      const out = grounded === "not-behind";
-      return {
-        call: out ? "OUT" : "NOT_OUT",
-        codes: [],
-        reasons: [
-          `The wicket broke between two frames ${bracketCheck.gapMs} ms apart in the same shot.`,
-          out ? "In both frames neither bat nor body was grounded behind the popping crease." : "In both frames bat or body was grounded behind the popping crease.",
-        ],
-        assumptions: ASSUMPTIONS.slice(),
-      };
+  /**
+   * The beta finding (SPEC 4.5). It is always INCONCLUSIVE: the extension
+   * reports what the viewer confirmed and what remains unknown, and never
+   * claims OUT or NOT OUT. A stumping also needs facts the frames can't give
+   * (NOT_ESTABLISHED), and two samples can't show grounding at the instant
+   * between them.
+   *
+   * bracket: { lastOn, firstOff, source, confirmed } (indices) | null
+   * times: frame media times; grounded: viewer's answer about BOTH bracket
+   * frames ('behind' | 'not-behind' | 'cant-see' | null).
+   * Returns { call, observations[], open: [{ code, text }], notEstablished[] }.
+   */
+  function decideFinding(bracketCheck, { bracket = null, times = [], creaseSource = null, grounded = null, formatTime = defaultTime } = {}) {
+    const observations = [];
+    const open = [];
+    const addOpen = (code) => open.push({ code, text: OPEN_TEXT[code] });
+
+    const confirmed = Boolean(bracket && bracket.confirmed);
+    bracketCheck.problems.forEach(addOpen);
+    if (bracket && !confirmed) addOpen("UNCONFIRMED_BRACKET");
+    if (confirmed && bracketCheck.valid) {
+      const by = bracket.source === "viewer" ? "You marked" : "You confirmed";
+      observations.push(`${by} the bails on at ${formatTime(times[bracket.lastOn])} and a bail off at ${formatTime(times[bracket.firstOff])}, ${bracketCheck.gapMs} ms apart in the same shot.`);
     }
-    return { call: "INCONCLUSIVE", codes, reasons: codes.map((c) => REASON_TEXT[c]), assumptions: ASSUMPTIONS.slice() };
+
+    if (creaseSource) observations.push(creaseSource === "viewer" ? "You set the popping crease line." : "A crease line was detected automatically; you haven’t checked or adjusted it.");
+    else addOpen("NO_CREASE");
+
+    if (grounded === "behind" || grounded === "not-behind") {
+      observations.push(grounded === "behind" ? "You judged bat or body grounded behind the crease in both frames." : "You judged neither bat nor body grounded behind the crease in either frame.");
+    } else if (grounded === "cant-see") addOpen("GROUNDING_NOT_VISIBLE");
+    else addOpen("GROUNDING_UNKNOWN");
+
+    const notEstablished = [...NOT_ESTABLISHED];
+    if (confirmed && bracketCheck.valid) notEstablished.push(`Grounding at the exact instant the wicket broke, somewhere in the ${bracketCheck.gapMs} ms between the two frames.`);
+    else notEstablished.push("Grounding at the exact instant the wicket broke.");
+
+    return { call: "INCONCLUSIVE", observations, open, notEstablished };
   }
 
   const round3 = (v) => (Number.isFinite(v) ? Math.round(v * 1000) / 1000 : v);
@@ -201,10 +219,10 @@
 
   /**
    * Builds the evidence packet. Frame images are never included.
-   * frames: [{ id, t }]; bracket: { lastOn, firstOff, source, confidence } indices;
+   * frames: [{ id, t }]; bracket: { lastOn, firstOff, source, confidence, confirmed } indices;
    * crease: { line (pixels), source, width, height } | null.
    */
-  function buildEvidencePacket({ video, window, trigger, capture, frames, bracket, bracketCheck, crease, grounded, hint, verdict, now = new Date() }) {
+  function buildEvidencePacket({ video, window, trigger, capture, frames, bracket, bracketCheck, crease, grounded, hint, finding, now = new Date() }) {
     const at = (i) => (Number.isInteger(i) && frames[i] ? { id: frames[i].id, t: round3(frames[i].t) } : null);
     return {
       schema: PACKET_SCHEMA,
@@ -214,13 +232,13 @@
       capture: { frames: frames.length, coverage: round3(capture.coverage), gaps: capture.gaps.map((g) => ({ from: round3(g.from), to: round3(g.to) })) },
       frames: frames.map((f) => ({ id: f.id, t: round3(f.t) })),
       bracket: bracket
-        ? { lastOn: at(bracket.lastOn), firstOff: at(bracket.firstOff), gapMs: bracketCheck.gapMs, sameShot: bracketCheck.sameShot, source: bracket.source, confidence: bracket.confidence ?? null }
+        ? { lastOn: at(bracket.lastOn), firstOff: at(bracket.firstOff), gapMs: bracketCheck.gapMs, sameShot: bracketCheck.sameShot, source: bracket.source, confidence: bracket.confidence ?? null, confirmed: Boolean(bracket.confirmed) }
         : null,
       crease: crease
         ? { line: { x1: normPoint(crease.line.x1, crease.width), y1: normPoint(crease.line.y1, crease.height), x2: normPoint(crease.line.x2, crease.width), y2: normPoint(crease.line.y2, crease.height) }, source: crease.source }
         : null,
       grounded: { value: grounded || "unknown", source: grounded ? "viewer" : "none", frames: bracket ? [at(bracket.lastOn), at(bracket.firstOff)].filter(Boolean).map((f) => f.id) : [], hint: hint ? { value: hint.value, confidence: hint.confidence } : null },
-      verdict: { call: verdict.call, reasons: verdict.reasons, assumptions: verdict.assumptions },
+      finding: { call: finding.call, observations: finding.observations, open: finding.open.map((o) => o.code), notEstablished: finding.notEstablished },
     };
   }
 
@@ -232,9 +250,9 @@
     createReplayDetector,
     reviewWindow,
     validateBracket,
-    decideVerdict,
+    decideFinding,
     buildEvidencePacket,
-    REASON_TEXT,
+    OPEN_TEXT,
   });
 
   root.FanDRSReview = api;

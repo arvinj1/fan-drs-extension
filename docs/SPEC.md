@@ -1,6 +1,6 @@
 # Fan DRS Review · Review foundation spec (v3)
 
-Status: implemented on branch `review-foundation` (A1 + this spec); revised in 0.3.1 after independent review (see `docs/receipts/BC-review.md`). Supersedes the slice B/C sections of `fan-drs-modernization-spec.v2.md`. Slice A1 stays as specified there.
+Status: implemented on branch `review-foundation` (A1 + this spec); revised in 0.3.1 after independent review (`docs/receipts/BC-review.md`) and in 0.3.2 after the PR #18 review (`docs/receipts/PR18-review.md`): **the beta never decides OUT or NOT OUT.** Supersedes the slice B/C sections of `fan-drs-modernization-spec.v2.md`. Slice A1 stays as specified there.
 
 ## 1. The problem
 
@@ -14,7 +14,7 @@ The first live test of 0.2.0 (Chrome on macOS, Cricbuzz "Best Fails of DRS", 202
 |---|---|---|
 | **Always ready** | Capture starts by itself on videos that are clearly cricket, with a one-click override on any video. | A question can only be answered from footage that was already captured. |
 | **One action to review** | Press **Review** (chip, `Alt+Shift+R`, or seek back and pause). The card opens already analyzed around that moment. | Replaying the moment is the natural gesture; the tool follows it. |
-| **Evidence, then a verdict** | Detectors propose the bail-off interval and crease, and suggest grounding. A verdict appears only when the interval is clear and the viewer has confirmed grounding with one tap; otherwise Inconclusive with the missing piece named. | A call that is rarely wrong is worth more than a call that is always present. |
+| **Evidence, not a verdict** | Detectors propose a *candidate* bail-off interval and a crease line. Nothing a detector proposes counts until the viewer confirms it. The finding is always Inconclusive in the beta; it lists what's been observed, what's still open, and what frames can't establish. | A stumping depends on facts a frame strip can't give. Showing the evidence honestly is worth more than a call that looks certain. |
 
 Every review also produces an **evidence packet**: a small JSON record of what was seen. It is the foundation for "ask the video": a future assistant answers from the packet, not from guesses about pixels.
 
@@ -23,8 +23,8 @@ Every review also produces an **evidence packet**: a small JSON record of what w
 1. **Watching.** On a cricket video, a chip beside the like button reads **● DRS ready**. On other videos it reads **DRS off**; one click turns capture on for that video, and the card can remember the choice for the channel.
 2. **Something close happens.** The viewer seeks back a few seconds and pauses, or presses the chip, or presses `Alt+Shift+R`.
 3. **The card opens, already working.** It shows the 12 seconds before that moment as a frame strip, the detected bail-off interval highlighted, and the frame just before the wicket broke enlarged.
-4. **They check, not operate.** If the detector got it right there is nothing to do. If not, they pick the bail-off frame, set the crease with two clicks, or answer one question: *at the moment the wicket broke, was bat or body grounded behind the crease?*
-5. **The finding.** OUT, NOT OUT or INCONCLUSIVE, with the reasons and the assumptions it rests on. **Copy evidence** puts the packet on the clipboard for a bot, a teammate or a bug report.
+4. **They check the evidence.** The detector's bail-off pair is a *candidate*. The viewer confirms both frames with one click, or marks their own. They can set the crease with two clicks and answer one question: *in the bail-on and bail-off frames, was bat or body grounded behind the crease?*
+5. **The finding.** Always Inconclusive in the beta, with three lists: what's been observed, what's still open, and what these frames can't establish. **Copy evidence** puts the packet on the clipboard for a bot, a teammate or a bug report.
 
 ## 4. Behaviour
 
@@ -65,7 +65,8 @@ One screen, no tabs:
 - **Strip:** thumbnails of the window's frames (up to 48), keyboard and pointer selectable. The last-bail-on and first-bail-off frames are marked, and so are frames after a camera cut. (Capture gaps are reported in the packet, not drawn.)
 - **Stage:** the selected frame enlarged, with the crease line overlaid when known. Click two points to set the crease.
 - **Grounding question:** about both bracket frames: *Behind in both* / *Not behind in both* / *They differ, or can't see*. The detector's suggestion is shown as text and never preselected. Changing the bracket or the crease clears the answer, because it referred to other frames or another line.
-- **Finding:** the call, reasons and assumptions. **Copy evidence** and **Review again**.
+- **Bracket:** a detector bracket is labelled *Candidate* everywhere (text, strip, stage) until the viewer presses **Confirm both frames** or marks frames themselves.
+- **Finding:** always *Inconclusive*, with *What's been observed*, *Still open* and *Not established by these frames*. **Copy evidence** and **Review again**.
 
 ### 4.4 Detectors
 
@@ -79,20 +80,27 @@ All detectors are pure functions over grayscale pixel arrays (`{ width, height, 
 | **Crease** | Strongest straight bright line in the whole frame, excluding the stumps, over angles −80°…80° from vertical. That covers side-on views; an end-on view's near-horizontal crease isn't searched. | Peak not clearly above the runner-up. Scoreboards and return creases can win; the viewer can set the line. |
 | **Grounding hint** | Non-turf mass (pixels far from the grayscale median of the lower frame, an idea from phase1 `foot_detection.js`) on each side of the crease line, low in the frame near the line. | Always a *hint*, capped at 0.6; never preselected, never decides the call |
 
-### 4.5 Verdict rule
+### 4.5 Finding (no verdict in the beta)
 
 ```
-bracket   = last frame with bail on, first frame with bail off
-valid     = both frames exist, same shot (no cut between), gap ≤ 400 ms
-crease    = located (detected or set by the viewer)
-grounded  = the viewer's answer about BOTH bracket frames (the hint never decides)
+bracket    = last frame with bail on, first frame with bail off
+candidate  = proposed by the detector; supports nothing until the viewer confirms both frames
+confirmed  = marked by the viewer, or a candidate the viewer confirmed
+valid      = both frames exist, same shot (no cut between), gap ≤ 400 ms
+crease     = located (detected, or set by the viewer)
+grounded   = the viewer's answer about BOTH bracket frames (the hint never decides)
 
-OUT          valid ∧ crease ∧ grounded = not behind in both
-NOT OUT      valid ∧ crease ∧ grounded = behind in both
-INCONCLUSIVE otherwise, with every failing condition listed
+finding    = INCONCLUSIVE, always
+observed   = a confirmed valid bracket; the crease (saying whether the viewer set it); the viewer's grounding answer
+open       = every missing or unconfirmed piece (NO_BRACKET, UNCONFIRMED_BRACKET, BRACKET_*, CUT_IN_BRACKET, NO_CREASE, GROUNDING_*)
+not established, always:
+  - a legal delivery (no-ball can't be ruled out)
+  - a fair break by the keeper, with the ball, with no other fielder involved
+  - whether a run was attempted (run out, not stumped)
+  - grounding at the instant the wicket broke, between the two sampled frames
 ```
 
-Assumptions are always listed: legal delivery, the wicket was put down by the keeper with the ball, and the camera shows the popping crease. These are things a frame strip can't establish. Laws referenced: MCC Laws 29 (wicket is down), 30 (batter out of ground), 39 (stumped).
+**Why there's no OUT / NOT OUT.** A stumping (MCC Laws 29, 30, 39) needs all of the above, and capture samples about every 250 ms, so the actual instant is never seen. A detector bracket is pixel change near the bails, which a keeper's glove that stays over them reproduces (a regression test covers this). A future decision mode needs evidence for each "not established" item, not more confidence in the pixels.
 
 ## 5. Evidence packet (`fan-drs.evidence/1`)
 
@@ -104,14 +112,14 @@ Assumptions are always listed: legal delivery, the wicket was put down by the ke
   "window": { "t0": 64.44, "t1": 76.44, "trigger": "chip" },
   "capture": { "frames": 45, "coverage": 1, "gaps": [] },
   "frames": [{ "id": 12, "t": 64.51 }],
-  "bracket": { "lastOn": { "id": 30, "t": 71.02 }, "firstOff": { "id": 31, "t": 71.27 }, "gapMs": 250, "sameShot": true, "source": "detector", "confidence": 0.86 },
+  "bracket": { "lastOn": { "id": 30, "t": 71.02 }, "firstOff": { "id": 31, "t": 71.27 }, "gapMs": 250, "sameShot": true, "source": "detector", "confidence": 0.86, "confirmed": true },
   "crease": { "line": { "x1": 0.41, "y1": 0.55, "x2": 0.47, "y2": 0.98 }, "source": "viewer" },
   "grounded": { "value": "unknown", "source": "none", "frames": [30, 31], "hint": { "value": "behind", "confidence": 0.42 } },
-  "verdict": { "call": "INCONCLUSIVE", "reasons": ["…"], "assumptions": ["…"] }
+  "finding": { "call": "INCONCLUSIVE", "observations": ["…"], "open": ["GROUNDING_UNKNOWN"], "notEstablished": ["…"] }
 }
 ```
 
-Coordinates are normalized to the frame (0–1). `grounded.frames` lists the frame IDs the answer covers. `video` is the identity of the video the frames came from, captured with the frames. Images are never included. The packet is produced only on Review and only leaves the tab when the viewer presses Copy.
+Coordinates are normalized to the frame (0–1). `grounded.frames` lists the frame IDs the answer covers. `bracket.confirmed` is false for an unconfirmed detector candidate. `finding.call` is always `INCONCLUSIVE` in the beta; `finding.open` holds stable codes. `video` is the identity of the video the frames came from, captured with the frames. Images are never included. The packet is produced only on Review and only leaves the tab when the viewer presses Copy.
 
 ## 6. Out of scope
 

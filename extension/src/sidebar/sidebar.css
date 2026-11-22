@@ -79,8 +79,7 @@ kbd { border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font: 1
 
 .finding { padding: 14px 0 4px; border-top: 1px solid var(--line); }
 .verdict { margin: 0 0 6px; font-size: 22px; font-weight: 800; letter-spacing: 0.02em; }
-.verdict.out { color: var(--off); }
-.verdict.notout { color: var(--accent); }
+.finding h3 { margin: 10px 0 4px; font-size: 13px; font-weight: 600; }
 .reasons { margin: 0 0 10px; padding-left: 18px; color: var(--muted); font-size: 13px; }
 details { margin-bottom: 10px; color: var(--muted); font-size: 12px; }
 summary { cursor: pointer; }

@@ -285,40 +285,75 @@ test("validateBracket checks presence, order, cuts and width", () => {
   assert.deepEqual(R.validateBracket(f, 0, 9).problems, ["NO_BRACKET"]);
 });
 
-test("decideVerdict needs a valid bracket, a crease, and the viewer's answer for both frames", () => {
-  const ok = R.validateBracket(frames([1, 1.25]), 0, 1);
-  const withCrease = { hasCrease: true };
-  assert.equal(R.decideVerdict(ok, "not-behind", withCrease).call, "OUT");
-  assert.equal(R.decideVerdict(ok, "behind", withCrease).call, "NOT_OUT");
-  assert.deepEqual(R.decideVerdict(ok, "not-behind").codes, ["NO_CREASE"], "no call without a crease");
-  const unknown = R.decideVerdict(ok, null, withCrease);
-  assert.equal(unknown.call, "INCONCLUSIVE");
-  assert.deepEqual(unknown.codes, ["GROUNDING_UNKNOWN"]);
-  assert.deepEqual(R.decideVerdict(ok, "cant-see", withCrease).codes, ["GROUNDING_NOT_VISIBLE"]);
-  const wide = R.validateBracket(frames([1, 2]), 0, 1);
-  assert.deepEqual(R.decideVerdict(wide, "not-behind", withCrease).codes, ["BRACKET_TOO_WIDE"], "a clear foot can't rescue a vague moment");
-  for (const v of [R.decideVerdict(ok, "behind", withCrease), unknown]) {
-    assert.equal(v.assumptions.length, 3);
-    assert.ok(v.reasons.every((r) => typeof r === "string" && r.length > 10));
+test("the beta finding is always inconclusive, whatever the viewer confirms", () => {
+  const times = [1, 1.25];
+  const ok = R.validateBracket(frames(times), 0, 1);
+  const bracket = { lastOn: 0, firstOff: 1, source: "viewer", confirmed: true };
+  for (const grounded of ["behind", "not-behind", "cant-see", null]) {
+    const f = R.decideFinding(ok, { bracket, times, creaseSource: "viewer", grounded });
+    assert.equal(f.call, "INCONCLUSIVE", `grounded=${grounded}`);
   }
+  const full = R.decideFinding(ok, { bracket, times, creaseSource: "viewer", grounded: "not-behind" });
+  assert.deepEqual(full.open, [], "nothing missing on the viewer's side");
+  assert.equal(full.observations.length, 3);
+  assert.ok(full.observations[0].includes("250 ms apart"), full.observations[0]);
+  // Facts the frames can't give are always listed, including the instant between samples.
+  assert.ok(full.notEstablished.some((x) => /legal/.test(x)));
+  assert.ok(full.notEstablished.some((x) => /fairly/.test(x)));
+  assert.ok(full.notEstablished.some((x) => /attempting a run/.test(x)));
+  assert.ok(full.notEstablished.some((x) => /250 ms between the two frames/.test(x)));
+});
+
+test("missing pieces are listed as open, with stable codes", () => {
+  const times = [1, 2];
+  const wide = R.validateBracket(frames(times), 0, 1);
+  const f = R.decideFinding(wide, { bracket: { lastOn: 0, firstOff: 1, source: "viewer", confirmed: true }, times, creaseSource: null, grounded: "cant-see" });
+  assert.deepEqual(f.open.map((o) => o.code), ["BRACKET_TOO_WIDE", "NO_CREASE", "GROUNDING_NOT_VISIBLE"]);
+  assert.ok(f.open.every((o) => typeof o.text === "string" && o.text.length > 10));
+  assert.ok(!f.observations.some((o) => /bails on/.test(o)), "an invalid bracket isn't reported as an observation");
+  const none = R.decideFinding(R.validateBracket([], null, null), {});
+  assert.deepEqual(none.open.map((o) => o.code), ["NO_BRACKET", "NO_CREASE", "GROUNDING_UNKNOWN"]);
+});
+
+test("regression: a glove that stays over the bails yields a candidate that supports nothing until confirmed", () => {
+  // Bails never come off; the keeper's glove arrives at frame 9 and stays.
+  const clipFrames = Array.from({ length: 16 }, (_, i) => scene({ noise: 4, seed: i + 1, glove: i >= 9 }));
+  const region = V.bailRegion(V.detectStumps(clipFrames[0]), clipFrames[0]);
+  const det = V.detectBailOff(clipFrames, region);
+  // Known gap (SPEC 4.4): pixels alone can't tell this from bails coming off.
+  assert.equal(det.ok, true, "the detector is fooled, which is why its output is only a candidate");
+  const times = clipFrames.map((_, i) => i * 0.25);
+  const ts = times.map((t, i) => ({ id: i + 1, t }));
+  const candidate = { lastOn: det.lastOn, firstOff: det.firstOff, source: "detector", confirmed: false };
+  const check = R.validateBracket(ts, candidate.lastOn, candidate.firstOff);
+  const f = R.decideFinding(check, { bracket: candidate, times, creaseSource: "detector", grounded: "not-behind" });
+  assert.equal(f.call, "INCONCLUSIVE");
+  assert.ok(f.open.some((o) => o.code === "UNCONFIRMED_BRACKET"), "the candidate must be flagged as unconfirmed");
+  assert.ok(!f.observations.some((o) => /bail/.test(o)), `an unconfirmed candidate must not be reported as a wicket break: ${f.observations}`);
+  assert.ok(!f.notEstablished.some((o) => /ms between the two frames/.test(o)), "no timing claim from an unconfirmed candidate");
+  const packet = R.buildEvidencePacket({ video: { id: "v" }, window: { t0: 0, t1: 4 }, trigger: "chip", capture: { coverage: 1, gaps: [] }, frames: ts, bracket: candidate, bracketCheck: check, crease: null, grounded: "not-behind", hint: null, finding: f });
+  assert.equal(packet.bracket.confirmed, false);
+  assert.equal(packet.bracket.source, "detector");
+  assert.ok(packet.finding.open.includes("UNCONFIRMED_BRACKET"));
 });
 
 test("buildEvidencePacket normalizes geometry and never carries images", () => {
   const f = [{ id: 7, t: 64.5104, jpeg: "data:image/jpeg;base64,AAAA" }, { id: 8, t: 64.7611 }];
   const check = R.validateBracket(f, 0, 1);
-  const verdict = R.decideVerdict(check, "behind", { hasCrease: true });
+  const bracketIn = { lastOn: 0, firstOff: 1, source: "detector", confidence: 0.8, confirmed: true };
+  const finding = R.decideFinding(check, { bracket: bracketIn, times: f.map((x) => x.t), creaseSource: "viewer", grounded: "behind" });
   const p = R.buildEvidencePacket({
     video: { id: "abc", title: "T", channel: "C" },
     window: { t0: 52.7611, t1: 64.7611 },
     trigger: "chip",
     capture: { coverage: 0.9, gaps: [{ from: 52.76, to: 54 }] },
     frames: f,
-    bracket: { lastOn: 0, firstOff: 1, source: "detector", confidence: 0.8 },
+    bracket: bracketIn,
     bracketCheck: check,
     crease: { line: { x1: 240, y1: 0, x2: 240, y2: 270 }, width: 480, height: 270, source: "viewer" },
     grounded: "behind",
     hint: { value: "behind", confidence: 0.5 },
-    verdict,
+    finding,
     now: new Date("2026-11-21T20:40:00Z"),
   });
   assert.equal(p.schema, "fan-drs.evidence/1");
@@ -327,9 +362,11 @@ test("buildEvidencePacket normalizes geometry and never carries images", () => {
   assert.equal(p.bracket.gapMs, 251);
   assert.deepEqual(p.crease.line, { x1: 0.5, y1: 0, x2: 0.5, y2: 1 });
   assert.deepEqual(p.grounded, { value: "behind", source: "viewer", frames: [7, 8], hint: { value: "behind", confidence: 0.5 } });
-  assert.equal(p.verdict.call, "NOT_OUT");
+  assert.equal(p.finding.call, "INCONCLUSIVE");
+  assert.equal(p.bracket.confirmed, true);
+  assert.ok(!("verdict" in p), "no verdict field: the beta never decides");
   assert.ok(!JSON.stringify(p).includes("base64"), "no image data");
-  const empty = R.buildEvidencePacket({ video: { id: "x" }, window: { t0: 0, t1: 1 }, trigger: "shortcut", capture: { coverage: 0, gaps: [] }, frames: [], bracket: null, bracketCheck: R.validateBracket([], null, null), crease: null, grounded: null, hint: null, verdict: R.decideVerdict(R.validateBracket([], null, null), null) });
+  const empty = R.buildEvidencePacket({ video: { id: "x" }, window: { t0: 0, t1: 1 }, trigger: "shortcut", capture: { coverage: 0, gaps: [] }, frames: [], bracket: null, bracketCheck: R.validateBracket([], null, null), crease: null, grounded: null, hint: null, finding: R.decideFinding(R.validateBracket([], null, null)) });
   assert.equal(empty.bracket, null);
   assert.deepEqual(empty.grounded, { value: "unknown", source: "none", frames: [], hint: null });
 });

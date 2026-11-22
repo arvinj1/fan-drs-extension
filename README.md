@@ -2,7 +2,7 @@
 
 A Chrome extension (Manifest V3) for reviewing close cricket dismissals on YouTube. It keeps the last few seconds of a cricket video ready, and when you review a moment it shows what the frames can prove: when the wicket broke, where the crease is, and whether that settles the call.
 
-**It is evidence, not an official decision.** OUT or NOT OUT appears only when the moment the wicket broke is pinned down to two frames in the same shot, and you've confirmed whether bat or body was grounded behind the crease. Otherwise the result is Inconclusive, with the missing evidence named. The design is in [`docs/SPEC.md`](docs/SPEC.md).
+**It shows evidence; it never decides.** The finding is always Inconclusive in this beta. It lists what's been observed, what's still open, and what a frame strip can't establish: a legal delivery, a fair break by the keeper, whether a run was attempted, and grounding at the exact instant. The design is in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Install (unpacked)
 
@@ -14,7 +14,7 @@ A Chrome extension (Manifest V3) for reviewing close cricket dismissals on YouTu
 
 - **● DRS ready** means capture is running (cricket was detected, or you turned it on). **DRS off** means it isn't; clicking it turns capture on for that video.
 - **Review a moment** in any of three ways: click the chip, press **Alt+Shift+R** (change it in `chrome://extensions/shortcuts`), or seek back a few seconds and pause. The card opens on the 12 seconds before that point, already analyzed.
-- **Check, don't operate.** The card marks the last frame with the bail on and the first with it off, and draws the crease if it found one. Correct either if needed: select a frame and mark it, or click two points on the crease. Then answer one question: was bat or body grounded behind the crease at that moment?
+- **Check the evidence.** The card proposes a *candidate* pair of frames: the last with the bails on and the first with one off. It counts only after you check both frames and press **Confirm both frames**, or mark your own. It draws the crease if it found one; click two points to set it yourself. Then answer one question about the two frames: was bat or body grounded behind the crease in both?
 - **Copy evidence** puts a JSON record of the review (`fan-drs.evidence/1`, no images) on the clipboard, ready for a chat, a teammate or a bug report.
 - **Remember for this channel** keeps capture on or off for every video from that channel.
 

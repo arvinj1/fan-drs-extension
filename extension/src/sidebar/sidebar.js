@@ -8,7 +8,8 @@
  *     (FanDRSVision) and renders the strip, stage, bracket, crease, grounding
  *     question and finding
  *   - lets the viewer correct any detector output; every change recomputes the
- *     verdict (FanDRSReview.decideVerdict) and the evidence packet
+ *     finding (FanDRSReview.decideFinding: always inconclusive in the beta) and
+ *     the evidence packet
  *
  * Decoding and detection run here, in the extension page, never in the
  * YouTube page.
@@ -171,7 +172,7 @@
     $("emptyView").hidden = true;
     $("reviewView").hidden = false;
     $("windowLabel").textContent = `Reviewing ${Core.formatPreciseTime(req.t0)} → ${Core.formatPreciseTime(req.t1)} · ${TRIGGER_LABEL[req.trigger] || ""}`;
-    setVerdictText("Analyzing…", "");
+    setVerdictText("Analyzing…");
     setStatus("Collecting frames…");
 
     let result;
@@ -184,7 +185,7 @@
     if (!current()) return;
     if (Number.isInteger(req.generation) && result.generation !== req.generation) {
       // The video changed between the request and the answer.
-      setVerdictText("—", "");
+      setVerdictText("—");
       setStatus("The video changed before the review finished. Review again.");
       return;
     }
@@ -237,7 +238,9 @@
     review.bailReason = "STUMPS_NOT_FOUND";
     if (review.stumps) {
       const b = Vision.detectBailOff(grays, Vision.bailRegion(review.stumps, grays[0]), { cuts: review.cuts });
-      if (b.ok) review.bracket = { lastOn: b.lastOn, firstOff: b.firstOff, source: "detector", confidence: b.confidence };
+      // A candidate only: the detector sees pixels change near the bails, which a
+      // glove can also cause. It supports nothing until the viewer confirms it.
+      if (b.ok) review.bracket = { lastOn: b.lastOn, firstOff: b.firstOff, source: "detector", confidence: b.confidence, confirmed: false };
       else review.bailReason = b.reason;
     }
 
@@ -257,7 +260,13 @@
     const times = review.frames.map((f) => ({ id: f.id, t: f.t }));
     const b = review.bracket;
     const check = Review.validateBracket(times, b ? b.lastOn : null, b ? b.firstOff : null, review.cuts);
-    const verdict = Review.decideVerdict(check, review.grounded, { hasCrease: Boolean(review.crease) });
+    const finding = Review.decideFinding(check, {
+      bracket: b,
+      times: review.frames.map((f) => f.t),
+      creaseSource: review.crease ? review.crease.source : null,
+      grounded: review.grounded,
+      formatTime: Core.formatPreciseTime,
+    });
     const packet = Review.buildEvidencePacket({
       video: review.video,
       window: { t0: review.req.t0, t1: review.req.t1 },
@@ -269,9 +278,9 @@
       crease: review.crease ? { line: review.crease.line, width: review.width, height: review.height, source: review.crease.source } : null,
       grounded: review.grounded,
       hint: review.hint && review.hint.value !== "unknown" ? review.hint : null,
-      verdict,
+      finding,
     });
-    return { check, verdict, packet };
+    return { check, finding, packet };
   }
 
   // ---------------------------------------------------------------------------
@@ -305,11 +314,13 @@
     $("bracketText").textContent = "";
     $("creaseText").textContent = "";
     $("hintText").textContent = "";
-    setVerdictText("NO FRAMES", "");
-    setList("reasons", [
+    setVerdictText("NO FRAMES");
+    $("btnConfirmBracket").hidden = true;
+    setList("observations", []);
+    setList("notEstablished", []);
+    setList("openItems", [
       state.ctx && !state.ctx.capture.on ? "Capture was off for this video. It’s on now; replay the moment and review again." : "Nothing was captured in this window. Replay the moment and review again.",
     ]);
-    setList("assumptions", []);
     setStatus(`No frames between ${Core.formatPreciseTime(req.t0)} and ${Core.formatPreciseTime(req.t1)}.`);
   }
 
@@ -320,15 +331,19 @@
     renderStage(r);
 
     const b = r.bracket;
-    const { check, verdict, packet } = evaluate(r);
+    const { check, finding, packet } = evaluate(r);
     r.packet = packet;
     if (b) {
-      // The detector's confidence is a ranking score, not a probability, so it isn't shown as a percentage.
-      const src = b.source === "detector" ? "detected automatically; check the two frames" : "set by you";
-      $("bracketText").textContent = `Between ${Core.formatPreciseTime(r.frames[b.lastOn].t)} (bail on) and ${Core.formatPreciseTime(r.frames[b.firstOff].t)} (bail off), ${check.gapMs} ms apart · ${src}.`;
+      // The detector's confidence is a ranking score, not a probability, so it isn't shown.
+      const span = `bails on at ${Core.formatPreciseTime(r.frames[b.lastOn].t)}, a bail off at ${Core.formatPreciseTime(r.frames[b.firstOff].t)} (${check.gapMs} ms apart)`;
+      $("bracketText").textContent =
+        b.source === "viewer" ? `Marked by you: ${span}.` :
+        b.confirmed ? `Confirmed by you: ${span}.` :
+        `Candidate, detected automatically: ${span}. Something over the bails can look the same, so check both frames, then confirm or mark them yourself.`;
     } else {
       $("bracketText").textContent = `${BAIL_REASON_COPY[r.bailReason] || "Not detected."} Select frames in the strip and mark them below.`;
     }
+    $("btnConfirmBracket").hidden = !(b && b.source === "detector" && !b.confirmed);
 
     const creaseText = r.crease
       ? r.crease.source === "detector"
@@ -343,15 +358,10 @@
     $("hintText").textContent = r.hint && HINT_COPY[r.hint.value] ? `${HINT_COPY[r.hint.value]} Check the frames and choose.` : "Look at the bail-on and bail-off frames and choose.";
     for (const input of document.querySelectorAll('input[name="grounded"]')) input.checked = input.value === r.grounded;
 
-    const cls = verdict.call === "OUT" ? "out" : verdict.call === "NOT_OUT" ? "notout" : "";
-    const label = verdict.call.replace("_", " ");
-    if (r.lastCall !== label) {
-      if (r.lastCall !== undefined) setStatus(`Finding: ${label}.`); // the one live announcement
-      r.lastCall = label;
-    }
-    setVerdictText(label, cls);
-    setList("reasons", verdict.reasons);
-    setList("assumptions", verdict.assumptions);
+    setVerdictText("INCONCLUSIVE");
+    setList("observations", finding.observations.length ? finding.observations : ["Nothing confirmed yet."]);
+    setList("openItems", finding.open.length ? finding.open.map((o) => o.text) : ["Nothing open on your side."]);
+    setList("notEstablished", finding.notEstablished);
     $("packetFallback").hidden = true;
   }
 
@@ -368,7 +378,8 @@
       if (b && i === b.lastOn) btn.classList.add("on");
       if (b && i === b.firstOff) btn.classList.add("off");
       if (r.cuts.has(i)) btn.classList.add("cut");
-      const label = `${Core.formatPreciseTime(f.t)}${b && i === b.lastOn ? ", last bail on" : ""}${b && i === b.firstOff ? ", first bail off" : ""}${r.cuts.has(i) ? ", after a camera cut" : ""}`;
+      const pre = b && b.source === "detector" && !b.confirmed ? "candidate " : "";
+      const label = `${Core.formatPreciseTime(f.t)}${b && i === b.lastOn ? `, ${pre}last bail on` : ""}${b && i === b.firstOff ? `, ${pre}first bail off` : ""}${r.cuts.has(i) ? ", after a camera cut" : ""}`;
       btn.setAttribute("aria-label", label);
       btn.title = label;
       const img = document.createElement("img");
@@ -387,7 +398,8 @@
     $("stageImg").src = f.jpeg;
     $("stageImg").alt = `Frame at ${Core.formatPreciseTime(f.t)}`;
     const b = r.bracket;
-    const role = b && r.selected === b.lastOn ? " · last bail on" : b && r.selected === b.firstOff ? " · first bail off" : "";
+    const pre = b && b.source === "detector" && !b.confirmed ? "candidate " : "";
+    const role = b && r.selected === b.lastOn ? ` · ${pre}last bail on` : b && r.selected === b.firstOff ? ` · ${pre}first bail off` : "";
     $("stageCaption").textContent = `${Core.formatPreciseTime(f.t)} · frame ${r.selected + 1} of ${r.frames.length}${role}`;
 
     const svg = $("stageOverlay");
@@ -406,9 +418,8 @@
     return el;
   }
 
-  function setVerdictText(text, cls) {
+  function setVerdictText(text) {
     $("verdict").textContent = text;
-    $("verdict").className = `verdict ${cls}`.trim();
   }
 
   function setList(id, items) {
@@ -452,7 +463,7 @@
     const r = state.review;
     if (!r) return;
     const b = r.bracket || { lastOn: null, firstOff: null };
-    const next = { ...b, [which]: r.selected, source: "viewer", confidence: null };
+    const next = { ...b, [which]: r.selected, source: "viewer", confidence: null, confirmed: true };
     if (which === "lastOn" && (next.firstOff === null || next.firstOff <= r.selected)) next.firstOff = Math.min(r.selected + 1, r.frames.length - 1);
     if (which === "firstOff" && (next.lastOn === null || next.lastOn >= r.selected)) next.lastOn = Math.max(r.selected - 1, 0);
     r.bracket = next;
@@ -514,6 +525,13 @@
   });
 
   $("btnSetOn").addEventListener("click", () => setBracketEnd("lastOn"));
+  $("btnConfirmBracket").addEventListener("click", () => {
+    const r = state.review;
+    if (!r || !r.bracket) return;
+    r.bracket = { ...r.bracket, confirmed: true };
+    setStatus("Bail-off frames confirmed.");
+    renderReview();
+  });
   $("btnSetOff").addEventListener("click", () => setBracketEnd("firstOff"));
   $("btnSetCrease").addEventListener("click", () => {
     if (!state.review) return;

@@ -108,7 +108,7 @@ const play = (seconds) =>
 const seekTo = (t) => video((x) => (document.querySelector("video.html5-main-video").currentTime = x), t);
 const waitVerdict = (re, timeout = 6000) => card().locator("#verdict", { hasText: re }).waitFor({ timeout });
 const bracketTimes = async () => {
-  const m = /Between (\d+):(\d+\.\d+) \(bail on\) and (\d+):(\d+\.\d+) \(bail off\), (\d+) ms/.exec(await text("#bracketText"));
+  const m = /bails on at (\d+):(\d+\.\d+), a bail off at (\d+):(\d+\.\d+) \((\d+) ms apart\)/.exec(await text("#bracketText"));
   return m ? { on: +m[1] * 60 + +m[2], off: +m[3] * 60 + +m[4], gap: +m[5] } : null;
 };
 
@@ -130,7 +130,7 @@ await step("chip on a non-cricket video turns capture on and opens the card hone
   await waitForCard(page);
   await card().locator("#capturePill", { hasText: "on for this video" }).waitFor({ timeout: 4000 });
   await waitVerdict("NO FRAMES");
-  expect(/replay the moment/i.test(await text("#reasons")), await text("#reasons"));
+  expect(/replay the moment/i.test(await text("#openItems")), await text("#openItems"));
   await page.locator("#fan-drs-btn", { hasText: "DRS ready" }).waitFor({ timeout: 3000 });
 });
 
@@ -170,11 +170,13 @@ await step("cricket video: capture starts by itself", async () => {
 await step("chip review detects the bail-off interval at the scripted 6.0 s", async () => {
   await page.click("#fan-drs-btn");
   await card().locator("#windowLabel", { hasText: "from the DRS button" }).waitFor({ timeout: 4000 });
-  await waitVerdict(/INCONCLUSIVE|OUT/);
+  await waitVerdict("INCONCLUSIVE");
   const b = await bracketTimes();
   expect(b, `no bracket: ${await text("#bracketText")}`);
   expect(b.on < 6.0 && b.off >= 6.0 && b.off - b.on <= 0.4, `bracket ${JSON.stringify(b)}`);
-  expect(/detected automatically/.test(await text("#bracketText")) && !/%/.test(await text("#bracketText")), await text("#bracketText"));
+  const bt = await text("#bracketText");
+  expect(/^Candidate, detected automatically/.test(bt) && !/%/.test(bt), bt);
+  expect(await card().locator("#btnConfirmBracket").isVisible(), "no way to confirm the candidate");
   await page.screenshot({ path: path.join(outDir, "01-review.png") });
 });
 
@@ -188,19 +190,26 @@ await step("crease is found near the painted line; the hint says not behind", as
   expect(/not behind/.test(await text("#hintText")), await text("#hintText"));
 });
 
-await step("verdict follows the viewer's grounding answer", async () => {
-  await waitVerdict("INCONCLUSIVE");
-  expect(/hasn’t been confirmed/.test(await text("#reasons")), await text("#reasons"));
+// The beta never decides: whatever the viewer confirms, the finding stays
+// inconclusive and says what is and isn't established.
+await step("an unconfirmed candidate supports nothing; the finding never says OUT", async () => {
   await card().locator('input[value="not-behind"]').check();
-  await waitVerdict(/^OUT$/);
-  await card().locator('input[value="behind"]').check();
-  await waitVerdict("NOT OUT");
-  await card().locator('input[value="cant-see"]').check();
   await waitVerdict("INCONCLUSIVE");
-  expect(/can’t be settled/.test(await text("#reasons")), await text("#reasons"));
-  await card().locator('input[value="not-behind"]').check();
-  await waitVerdict(/^OUT$/);
-  await page.screenshot({ path: path.join(outDir, "02-out.png") });
+  expect(/hasn’t been confirmed/.test(await text("#openItems")), await text("#openItems"));
+  expect(!/bail/.test(await text("#observations")), `candidate reported as a wicket break: ${await text("#observations")}`);
+  await card().locator("#btnConfirmBracket").click();
+  await card().locator("#bracketText", { hasText: "Confirmed by you" }).waitFor({ timeout: 2000 });
+  expect(await card().locator("#btnConfirmBracket").isHidden(), "confirm button still shown");
+  for (const value of ["not-behind", "behind", "cant-see", "not-behind"]) {
+    await card().locator(`input[value="${value}"]`).check();
+    await waitVerdict("INCONCLUSIVE");
+    expect(!/^(NOT )?OUT$/.test(await text("#verdict")), `verdict decided: ${await text("#verdict")}`);
+  }
+  const obs = await text("#observations");
+  expect(/You confirmed the bails on at/.test(obs) && /neither bat nor body/.test(obs) && /haven’t checked/.test(obs), obs);
+  const ne = await text("#notEstablished");
+  expect(/attempting a run/.test(ne) && /ms between the two frames/.test(ne) && /legal/.test(ne), ne);
+  await page.screenshot({ path: path.join(outDir, "02-finding.png") });
 });
 
 await step("copy evidence produces a packet that matches the card", async () => {
@@ -210,9 +219,10 @@ await step("copy evidence produces a packet that matches the card", async () => 
   const p = JSON.parse(raw);
   expect(p.schema === "fan-drs.evidence/1", p.schema);
   expect(p.video.id === "stump1" && p.video.title.includes("stumping"), JSON.stringify(p.video));
-  expect(p.verdict.call === "OUT", p.verdict.call);
+  expect(p.finding.call === "INCONCLUSIVE" && !("verdict" in p), JSON.stringify(p.finding));
+  expect(p.finding.notEstablished.some((x) => /attempting a run/.test(x)), JSON.stringify(p.finding.notEstablished));
   expect(p.grounded.value === "not-behind" && p.grounded.source === "viewer", JSON.stringify(p.grounded));
-  expect(p.bracket.lastOn.t < 6 && p.bracket.firstOff.t >= 6 && p.bracket.source === "detector", JSON.stringify(p.bracket));
+  expect(p.bracket.lastOn.t < 6 && p.bracket.firstOff.t >= 6 && p.bracket.source === "detector" && p.bracket.confirmed === true, JSON.stringify(p.bracket));
   expect(Math.abs((p.crease.line.x1 + p.crease.line.x2) / 2 - 281.5 / 480) < 0.01, JSON.stringify(p.crease));
   expect(!raw.includes("base64"), "packet contains image data");
 });
@@ -221,12 +231,12 @@ await step("the viewer can override the bracket and set the crease with two clic
   await card().locator("#strip").focus();
   await page.keyboard.press("Home");
   await page.keyboard.press("ArrowRight");
-  expect((await text("#verdict")) === "OUT", "precondition: an OUT answer is in place");
+  expect((await card().locator('input[value="not-behind"]:checked').count()) === 1, "precondition: a grounding answer is in place");
   await card().locator("#btnSetOff").click();
-  expect(/set by you/.test(await text("#bracketText")), await text("#bracketText"));
+  expect(/^Marked by you/.test(await text("#bracketText")), await text("#bracketText"));
   // The answer was about the old frames, so it must not carry over.
-  await waitVerdict("INCONCLUSIVE");
   expect((await card().locator('input[name="grounded"]:checked').count()) === 0, "grounding answer survived a bracket edit");
+  expect(!/You judged/.test(await text("#observations")), `stale grounding observation: ${await text("#observations")}`);
   await card().locator("#btnSetCrease").click();
   const box = await card().locator("#stageImg").boundingBox();
   const sx = box.width / 480;
@@ -248,7 +258,7 @@ await step("replay gesture: seek back and pause opens a fresh review", async () 
   await play(0.6);
   await video(() => document.querySelector("video.html5-main-video").pause());
   await card().locator("#windowLabel", { hasText: "from your replay pause" }).waitFor({ timeout: 4000 });
-  await waitVerdict(/^(INCONCLUSIVE|OUT|NOT OUT)$/);
+  await waitVerdict(/^INCONCLUSIVE$/);
   // Paused at ~7 s, but the window runs to where the viewer seeked back from (~9.8 s), so 6.0 s is covered.
   const label = await text("#windowLabel");
   const t1 = Number(/→ 0:(\d+\.\d+)/.exec(label)?.[1]);
@@ -289,7 +299,7 @@ await step("the content script reviews on the shortcut's message", async () => {
 });
 
 await step("keyboard: strip arrows move the selection, Escape closes", async () => {
-  await waitVerdict(/INCONCLUSIVE|OUT/);
+  await waitVerdict("INCONCLUSIVE");
   await card().locator("#strip").focus();
   await page.keyboard.press("End");
   const last = await text("#stageCaption");
@@ -301,7 +311,7 @@ await step("keyboard: strip arrows move the selection, Escape closes", async () 
 
 await step("a review that finishes after navigation never shows the old video's result", async () => {
   await page.click("#fan-drs-btn");
-  await waitVerdict(/INCONCLUSIVE|OUT|NO FRAMES/);
+  await waitVerdict(/INCONCLUSIVE|NO FRAMES/);
   // Slow decoding in the card so the navigation lands mid-review.
   await card().evaluate(() => {
     const original = window.createImageBitmap;
@@ -330,7 +340,7 @@ await step("back-to-back reviews: the newer one wins", async () => {
     for (const t of await chrome.tabs.query({})) await chrome.tabs.sendMessage(t.id, { fanDRS: "review" }).catch(() => {});
   });
   await card().locator("#windowLabel", { hasText: "keyboard shortcut" }).waitFor({ timeout: 4000 });
-  await waitVerdict(/^(INCONCLUSIVE|OUT|NOT OUT)$/, 8000);
+  await waitVerdict(/^INCONCLUSIVE$/, 8000);
   await page.waitForTimeout(1500);
   expect(/keyboard shortcut/.test(await text("#windowLabel")), `older review replaced the newer one: ${await text("#windowLabel")}`);
   await card().locator("#btnCopy").click();
@@ -342,7 +352,7 @@ await step("back-to-back reviews: the newer one wins", async () => {
 
 await step("narrow viewport: card fits within 390px", async () => {
   await page.click("#fan-drs-btn");
-  await waitVerdict(/INCONCLUSIVE|OUT|NO FRAMES/);
+  await waitVerdict(/INCONCLUSIVE|NO FRAMES/);
   await page.setViewportSize({ width: 390, height: 844 });
   const box = await page.evaluate(() => {
     const host = [...document.documentElement.children].find((el) => el.getAttribute("aria-label") === "Fan DRS Review");
@@ -367,7 +377,7 @@ await step("watch-to-watch navigation clears the review", async () => {
 await step("same <video> reused across navigation clears the review", async () => {
   await play(1);
   await page.click("#fan-drs-btn");
-  await waitVerdict(/INCONCLUSIVE|OUT|NO FRAMES/);
+  await waitVerdict(/INCONCLUSIVE|NO FRAMES/);
   await page.evaluate(() => (document.querySelector("video.html5-main-video").dataset.reuseMarker = "1"));
   await page.evaluate(() => window.fixtureNavigate("/watch?v=stump3", { reuse: true, fx: "stumping" }));
   await card().locator("#statusText", { hasText: "cleared" }).waitFor({ timeout: 3000 });

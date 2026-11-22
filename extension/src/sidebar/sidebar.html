@@ -46,6 +46,7 @@
         <h2 id="hBracket">When did the wicket break?</h2>
         <p id="bracketText" class="detail"></p>
         <div class="row">
+          <button id="btnConfirmBracket" class="primary" type="button" hidden>Confirm both frames</button>
           <button id="btnSetOn" type="button">Last bail on = this frame</button>
           <button id="btnSetOff" type="button">First bail off = this frame</button>
         </div>
@@ -73,11 +74,13 @@
       <section class="finding" aria-labelledby="hFinding">
         <h2 id="hFinding" class="visually-hidden">Finding</h2>
         <p id="verdict" class="verdict">—</p>
-        <ul id="reasons" class="reasons"></ul>
-        <details>
-          <summary>Assumptions</summary>
-          <ul id="assumptions" class="reasons"></ul>
-        </details>
+        <p class="detail">Automatic OUT / NOT OUT calls are off in this beta.</p>
+        <h3>What’s been observed</h3>
+        <ul id="observations" class="reasons"></ul>
+        <h3>Still open</h3>
+        <ul id="openItems" class="reasons"></ul>
+        <h3>Not established by these frames</h3>
+        <ul id="notEstablished" class="reasons"></ul>
         <div class="row">
           <button id="btnCopy" class="primary" type="button">Copy evidence</button>
           <button id="btnReviewAgain" type="button">Review again from here</button>
@@ -88,7 +91,7 @@
   </main>
 
   <p id="statusText" class="status" role="status" aria-live="polite"></p>
-  <footer>v0.3.1 · Runs on your device. Frames stay in this tab and are never uploaded.</footer>
+  <footer>v0.3.2 · Runs on your device. Frames stay in this tab and are never uploaded.</footer>
 
   <script src="../shared/core.js"></script>
   <script src="../shared/vision.js"></script>
