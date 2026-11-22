@@ -1,155 +1,101 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Fan DRS Review</title>
-  <link rel="stylesheet" href="sidebar.css"/>
+  <link rel="stylesheet" href="sidebar.css" />
 </head>
 <body>
-  <div class="app">
-    <header class="header">
-      <div class="title">
-        <div class="brand">Fan DRS</div>
-        <div class="sub">YouTube cricket dismissals • Stumping + Official DRS + LBW (Fan)</div>
-      </div>
-      <div class="headerActions">
-        <button id="btnClose" class="btn ghost" title="Close">✕</button>
-      </div>
-    </header>
+  <header class="top">
+    <div class="brand">
+      <h1>Fan DRS</h1>
+      <p class="sub">Evidence from the frames, not an official decision.</p>
+    </div>
+    <button id="btnClose" class="icon" type="button" aria-label="Close panel">✕</button>
+  </header>
 
-    <section class="context" id="context">
-      <div class="row">
-        <div class="label">Video</div>
-        <div class="value" id="ctxTitle">—</div>
-      </div>
-      <div class="row">
-        <div class="label">Channel</div>
-        <div class="value" id="ctxChannel">—</div>
-      </div>
-      <div class="row">
-        <div class="label">Time</div>
-        <div class="value" id="ctxTime">—</div>
-      </div>
+  <section class="capture" aria-label="Capture">
+    <div class="captureLine">
+      <span id="capturePill" class="pill">—</span>
+      <button id="btnCapture" class="link" type="button">—</button>
+    </div>
+    <label class="remember"><input id="rememberChannel" type="checkbox" /> <span id="rememberLabel">Remember for this channel</span></label>
+  </section>
+
+  <main>
+    <section id="emptyView" class="empty">
+      <p>Seek back to a close moment and pause, press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>, or use the button below to review the last 12 seconds.</p>
+      <button id="btnReviewNow" class="primary" type="button">Review the last 12 seconds</button>
     </section>
 
-    <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="replay">Replay</button>
-      <button class="tab" data-tab="drs">DRS Card</button>
-      <button class="tab" data-tab="challenge">Challenge</button>
-      <button class="tab" data-tab="why">Why</button>
-    </nav>
+    <section id="reviewView" hidden>
+      <p id="windowLabel" class="windowLabel"></p>
 
-    <main class="main">
-      <section class="panel active" id="panel-replay">
-        <div class="verdictCard">
-          <div class="verdictTop">
-            <div>
-              <div class="verdictLabel">Verdict</div>
-              <div class="verdictValue" id="verdictValue">—</div>
-            </div>
-            <div class="pill" id="modePill">WAITING</div>
-          </div>
-          <div class="meter">
-            <div class="meterLabel">Confidence</div>
-            <div class="meterBar"><div class="meterFill" id="meterFill"></div></div>
-            <div class="meterValue" id="meterValue">—</div>
-          </div>
+      <figure class="stage">
+        <div class="stageBox" id="stageBox">
+          <img id="stageImg" alt="" />
+          <svg id="stageOverlay" aria-hidden="true"></svg>
         </div>
+        <figcaption id="stageCaption"></figcaption>
+      </figure>
 
-        <div class="card">
-          <div class="cardTitle">Dismissal window</div>
-          <div class="inline">
-            <button class="btn" id="btnLast12">Last 12s</button>
-            <button class="btn" id="btnMarkStart">Mark Start</button>
-            <button class="btn" id="btnMarkEnd">Mark End</button>
-          </div>
-          <div class="small" id="windowText">Defaults to last 12 seconds.</div>
-        </div>
+      <div id="strip" class="strip" role="listbox" aria-label="Captured frames" tabindex="0"></div>
 
-        <div class="card">
-          <div class="cardTitle">Run analysis</div>
-          <div class="inline">
-            <button class="btn primary" id="btnAnalyze">Analyze</button>
-            <button class="btn ghost" id="btnReset">Reset</button>
-          </div>
-          <div class="small" id="statusText">Ready.</div>
-        </div>
-
-        <div class="card">
-          <div class="cardTitle">Timeline</div>
-          <div class="timeline">
-            <div class="timelineBar"><div class="marker" style="left:20%" title="Bounce"></div><div class="marker" style="left:55%" title="Impact"></div><div class="marker" style="left:72%" title="Bail off"></div></div>
-            <div class="timelineLegend small">Markers appear when detected or user-set.</div>
-          </div>
+      <section class="step" aria-labelledby="hBracket">
+        <h2 id="hBracket">When did the wicket break?</h2>
+        <p id="bracketText" class="detail"></p>
+        <div class="row">
+          <button id="btnConfirmBracket" class="primary" type="button" hidden>Confirm both frames</button>
+          <button id="btnSetOn" type="button">Last bail on = this frame</button>
+          <button id="btnSetOff" type="button">First bail off = this frame</button>
         </div>
       </section>
 
-      <section class="panel" id="panel-drs">
-        <div class="card">
-          <div class="cardTitle">DRS Card</div>
-          <div class="drsGrid">
-            <div class="drsItem"><div class="k">Pitching</div><div class="v" id="drsPitching">—</div></div>
-            <div class="drsItem"><div class="k">Impact</div><div class="v" id="drsImpact">—</div></div>
-            <div class="drsItem"><div class="k">Wickets</div><div class="v" id="drsWickets">—</div></div>
-            <div class="drsItem"><div class="k">Official</div><div class="v" id="drsOfficial">—</div></div>
-          </div>
-          <div class="small">If broadcast DRS overlays are detected, we’ll show them here.</div>
+      <section class="step" aria-labelledby="hCrease">
+        <h2 id="hCrease">Where is the popping crease?</h2>
+        <p id="creaseText" class="detail"></p>
+        <div class="row">
+          <button id="btnSetCrease" type="button" aria-pressed="false">Set crease: click two points</button>
+          <button id="btnClearCrease" type="button">Clear</button>
         </div>
       </section>
 
-      <section class="panel" id="panel-challenge">
-        <div class="card">
-          <div class="cardTitle">Challenge Mode (optional)</div>
-          <div class="small">
-            Help the model by setting key points. This boosts confidence and teaches you how third-umpire calls work.
-          </div>
-          <div class="challenge">
-            <div class="challengeRow">
-              <div class="badge">+10</div>
-              <div><div class="challengeTitle">Set crease line</div><div class="small">Click two points on the popping crease.</div></div>
-              <button class="btn" disabled>Coming soon</button>
-            </div>
-            <div class="challengeRow">
-              <div class="badge">+10</div>
-              <div><div class="challengeTitle">Pick bail-off frame</div><div class="small">Select the exact frame the bail leaves.</div></div>
-              <button class="btn" disabled>Coming soon</button>
-            </div>
-            <div class="challengeRow">
-              <div class="badge">+15</div>
-              <div><div class="challengeTitle">Predict LBW</div><div class="small">Hitting / Missing / Inconclusive</div></div>
-              <button class="btn" disabled>Coming soon</button>
-            </div>
-          </div>
+      <fieldset class="step" id="grounding">
+        <legend>In the bail-on and bail-off frames, was bat or body grounded behind the crease?</legend>
+        <p id="hintText" class="detail"></p>
+        <div class="row choices">
+          <label><input type="radio" name="grounded" value="behind" /> Behind in both</label>
+          <label><input type="radio" name="grounded" value="not-behind" /> Not behind in both</label>
+          <label><input type="radio" name="grounded" value="cant-see" /> They differ, or can’t see</label>
         </div>
+      </fieldset>
+
+      <section class="finding" aria-labelledby="hFinding">
+        <h2 id="hFinding" class="visually-hidden">Finding</h2>
+        <p id="verdict" class="verdict">—</p>
+        <p class="detail">Automatic OUT / NOT OUT calls are off in this beta.</p>
+        <h3>What’s been observed</h3>
+        <ul id="observations" class="reasons"></ul>
+        <h3>Still open</h3>
+        <ul id="openItems" class="reasons"></ul>
+        <h3>Not established by these frames</h3>
+        <ul id="notEstablished" class="reasons"></ul>
+        <div class="row">
+          <button id="btnCopy" class="primary" type="button">Copy evidence</button>
+          <button id="btnReviewAgain" type="button">Review again from here</button>
+        </div>
+        <textarea id="packetFallback" readonly hidden aria-label="Evidence packet"></textarea>
       </section>
+    </section>
+  </main>
 
-      <section class="panel" id="panel-why">
-        <div class="card">
-          <div class="cardTitle">Why this verdict</div>
-          <ul class="bullets" id="whyBullets">
-            <li>We haven’t analyzed this clip yet.</li>
-            <li>Click Analyze to capture keyframes and begin.</li>
-            <li>We’ll stay conservative on close calls.</li>
-          </ul>
-          <div class="small">Fan DRS is not official. If broadcast DRS is present, we’ll highlight it.</div>
-        </div>
+  <p id="statusText" class="status" role="status" aria-live="polite"></p>
+  <footer>v0.3.2 · Runs on your device. Frames stay in this tab and are never uploaded.</footer>
 
-        <div class="card">
-          <div class="cardTitle">Feedback</div>
-          <div class="inline">
-            <button class="btn" id="btnAgree">Agree</button>
-            <button class="btn" id="btnDisagree">Disagree</button>
-            <button class="btn ghost" id="btnNotSure">Not sure</button>
-          </div>
-          <div class="small" id="feedbackText">Your feedback helps calibration (opt-in later).</div>
-        </div>
-      </section>
-    </main>
-
-    <footer class="footer small">v0.1.1 • Client-first analysis • Optional “Accuracy Boost” later</footer>
-  </div>
-
+  <script src="../shared/core.js"></script>
+  <script src="../shared/vision.js"></script>
+  <script src="../shared/review.js"></script>
   <script src="sidebar.js"></script>
 </body>
 </html>
