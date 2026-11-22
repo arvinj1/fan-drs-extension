@@ -34,7 +34,7 @@ npm run verify       # static checks + unit tests
 CHROME_PATH=/path/to/chrome npm run smoke   # browser smoke test on local fixture pages
 ```
 
-`npm run smoke` needs Chrome for Testing or Chromium (branded Google Chrome ignores `--load-extension`). It serves `test/browser/fixtures/watch.html` at youtube.com URLs through request routing, so the production manifest runs unchanged. The clips are synthetic and generated with ffmpeg: a test pattern, and a side-on stumping where the bail comes off at exactly 6.0 s (see the comment in `watch.html`). Screenshots and `results.json` go to `test/browser/out/`.
+`npm run smoke` needs Chrome for Testing or Chromium (recent branded Google Chrome builds may ignore `--load-extension`). It serves `test/browser/fixtures/watch.html` at youtube.com URLs through request routing, so the production manifest runs unchanged. The clips are synthetic and generated with ffmpeg: a test pattern, and a side-on stumping where the bail comes off at exactly 6.0 s (see the comment in `watch.html`). Screenshots and `results.json` go to `test/browser/out/`.
 
 The fixtures are not YouTube. Before a release, also test by hand on a real public replay, and record the Chrome version, OS, clip and results in `docs/receipts/`.
 

@@ -197,7 +197,7 @@ await step("verdict follows the viewer's grounding answer", async () => {
   await waitVerdict("NOT OUT");
   await card().locator('input[value="cant-see"]').check();
   await waitVerdict("INCONCLUSIVE");
-  expect(/can’t be seen/.test(await text("#reasons")), await text("#reasons"));
+  expect(/can’t be settled/.test(await text("#reasons")), await text("#reasons"));
   await card().locator('input[value="not-behind"]').check();
   await waitVerdict(/^OUT$/);
   await page.screenshot({ path: path.join(outDir, "02-out.png") });
@@ -221,8 +221,12 @@ await step("the viewer can override the bracket and set the crease with two clic
   await card().locator("#strip").focus();
   await page.keyboard.press("Home");
   await page.keyboard.press("ArrowRight");
+  expect((await text("#verdict")) === "OUT", "precondition: an OUT answer is in place");
   await card().locator("#btnSetOff").click();
   expect(/set by you/.test(await text("#bracketText")), await text("#bracketText"));
+  // The answer was about the old frames, so it must not carry over.
+  await waitVerdict("INCONCLUSIVE");
+  expect((await card().locator('input[name="grounded"]:checked').count()) === 0, "grounding answer survived a bracket edit");
   await card().locator("#btnSetCrease").click();
   const box = await card().locator("#stageImg").boundingBox();
   const sx = box.width / 480;
@@ -244,8 +248,24 @@ await step("replay gesture: seek back and pause opens a fresh review", async () 
   await play(0.6);
   await video(() => document.querySelector("video.html5-main-video").pause());
   await card().locator("#windowLabel", { hasText: "from your replay pause" }).waitFor({ timeout: 4000 });
-  await waitVerdict(/INCONCLUSIVE|OUT/);
-  expect((await page.getAttribute("#fan-drs-btn", "aria-expanded")) === "true", "card not open");
+  await waitVerdict(/^(INCONCLUSIVE|OUT|NOT OUT)$/);
+  // Paused at ~7 s, but the window runs to where the viewer seeked back from (~9.8 s), so 6.0 s is covered.
+  const label = await text("#windowLabel");
+  const t1 = Number(/→ 0:(\d+\.\d+)/.exec(label)?.[1]);
+  expect(t1 > 9, `window should extend to the seek origin: ${label}`);
+  const b = await bracketTimes();
+  expect(b && b.on < 6 && b.off >= 6, `bail-off not found from a replay pause: ${await text("#bracketText")}`);
+});
+
+await step("the replay gesture doesn't replace a review that's open", async () => {
+  const before = await text("#windowLabel");
+  await seekTo(9);
+  await play(0.6);
+  await seekTo(5);
+  await play(0.4);
+  await video(() => document.querySelector("video.html5-main-video").pause());
+  await page.waitForTimeout(800);
+  expect((await text("#windowLabel")) === before, `open review was replaced: ${await text("#windowLabel")}`);
 });
 
 await step("a plain pause does not open anything", async () => {
@@ -256,7 +276,10 @@ await step("a plain pause does not open anything", async () => {
   expect((await page.getAttribute("#fan-drs-btn", "aria-expanded")) === "false", "card opened on a plain pause");
 });
 
-await step("keyboard shortcut command reviews the current moment", async () => {
+// Chrome commands can't be pressed in headless Chrome, so this sends the
+// message the service worker's onCommand handler sends. The handler itself is
+// four lines and is checked by hand in the live test.
+await step("the content script reviews on the shortcut's message", async () => {
   const [sw] = context.serviceWorkers().length ? context.serviceWorkers() : [await context.waitForEvent("serviceworker")];
   await sw.evaluate(async () => {
     const tabs = await chrome.tabs.query({});
@@ -274,6 +297,47 @@ await step("keyboard: strip arrows move the selection, Escape closes", async () 
   expect((await text("#stageCaption")) !== last, "arrow did not move");
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => document.getElementById("fan-drs-btn").getAttribute("aria-expanded") === "false");
+});
+
+await step("a review that finishes after navigation never shows the old video's result", async () => {
+  await page.click("#fan-drs-btn");
+  await waitVerdict(/INCONCLUSIVE|OUT|NO FRAMES/);
+  // Slow decoding in the card so the navigation lands mid-review.
+  await card().evaluate(() => {
+    const original = window.createImageBitmap;
+    window.createImageBitmap = async (...args) => {
+      await new Promise((r) => setTimeout(r, 400));
+      return original(...args);
+    };
+  });
+  await card().locator("#btnReviewAgain").click();
+  await page.waitForTimeout(200);
+  await page.evaluate(() => window.fixtureNavigate("/watch?v=pattern9"));
+  await card().locator("#statusText", { hasText: "New video" }).waitFor({ timeout: 4000 });
+  await page.waitForTimeout(1500); // longer than the slowed decode
+  expect(await card().locator("#reviewView").isHidden(), `stale review rendered: ${await text("#windowLabel")} / ${await text("#verdict")}`);
+  expect(/New video/.test(await text("#statusText")), `status overwritten: ${await text("#statusText")}`);
+});
+
+await step("back-to-back reviews: the newer one wins", async () => {
+  await page.evaluate(() => window.fixtureNavigate("/watch?v=stump5", { fx: "stumping" }));
+  await seekTo(0);
+  await play(8.6);
+  await video(() => document.querySelector("video.html5-main-video").pause());
+  await page.click("#fan-drs-btn");
+  const [sw] = context.serviceWorkers();
+  await sw.evaluate(async () => {
+    for (const t of await chrome.tabs.query({})) await chrome.tabs.sendMessage(t.id, { fanDRS: "review" }).catch(() => {});
+  });
+  await card().locator("#windowLabel", { hasText: "keyboard shortcut" }).waitFor({ timeout: 4000 });
+  await waitVerdict(/^(INCONCLUSIVE|OUT|NOT OUT)$/, 8000);
+  await page.waitForTimeout(1500);
+  expect(/keyboard shortcut/.test(await text("#windowLabel")), `older review replaced the newer one: ${await text("#windowLabel")}`);
+  await card().locator("#btnCopy").click();
+  await card().locator("#statusText", { hasText: /Evidence copied|Copying was blocked/ }).waitFor({ timeout: 3000 });
+  const raw = (await text("#statusText")).includes("copied") ? await page.evaluate(() => navigator.clipboard.readText()) : await card().locator("#packetFallback").inputValue();
+  const p = JSON.parse(raw);
+  expect(p.video.id === "stump5" && p.window.trigger === "shortcut", `packet: ${JSON.stringify(p.video)} ${p.window.trigger}`);
 });
 
 await step("narrow viewport: card fits within 390px", async () => {

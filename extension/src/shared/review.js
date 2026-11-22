@@ -27,26 +27,56 @@
   // Cricket detection and capture policy
   // ---------------------------------------------------------------------------
 
-  // Strong terms identify cricket on their own; weak terms need a second signal.
-  const STRONG = ["cricket", "wicket", "wickets", "stumping", "stumped", "drs", "lbw", "ipl", "bbl", "psl", "ashes", "run out", "run-out", "third umpire", "bcci", "icc", "odi", "t20", "t20i", "test match", "cricbuzz", "espncricinfo"];
-  const WEAK = ["test", "bowled", "bowler", "batter", "batsman", "umpire", "over", "innings", "century", "duck", "sixes", "boundary", "keeper"];
+  // Terms that only mean cricket. One in the title or channel is enough.
+  const DEFINITE = ["stumping", "stumped", "lbw", "ipl", "bbl", "t20", "t20i", "t20is", "wicketkeeper", "wicket-keeper", "third umpire", "test match", "cricbuzz", "espncricinfo", "bcci"];
+  // Terms that also mean something else (Cricket Wireless, Ashes of Creation, DRS in F1,
+  // ICC colour profiles, PSL the console, "we ran out of time"). Two distinct signals needed.
+  const AMBIGUOUS = ["cricket", "wicket", "wickets", "drs", "ashes", "icc", "psl", "odi", "odis", "run out", "run-out", "innings", "bowled", "umpire", "century", "duck", "sixes", "boundary"];
+  // Franchise codes are cricket-specific; national team names are not (hockey, football).
+  const FRANCHISES = ["csk", "mi", "rcb", "kkr", "srh", "dc", "pbks", "rr", "lsg", "gt"];
+  const NATIONS = ["ind", "india", "aus", "australia", "eng", "england", "pak", "pakistan", "sa", "rsa", "south africa", "nz", "new zealand", "sl", "sri lanka", "wi", "west indies", "ban", "bangladesh", "afg", "afghanistan", "zim", "zimbabwe", "ire", "ireland"];
 
-  function wordHits(text, terms) {
-    const lower = ` ${String(text || "").toLowerCase().replace(/[^a-z0-9\- ]+/g, " ")} `;
-    return terms.filter((t) => lower.includes(` ${t} `));
+  /** Lower-case words with letters and digits split ("IPL2025" -> "ipl 2025"), padded for whole-word matching. */
+  function normalize(text) {
+    return ` ${String(text || "")
+      .toLowerCase()
+      .replace(/([a-z])(\d)/g, "$1 $2")
+      .replace(/(\d)([a-z])/g, "$1 $2")
+      .replace(/[^a-z0-9\- ]+/g, " ")
+      .replace(/\s+/g, " ")} `;
+  }
+
+  const hits = (norm, terms) => terms.filter((t) => norm.includes(` ${t} `));
+
+  /** "<team> v|vs <team>" in a normalized string. Returns "franchise" | "nation" | null. */
+  function fixture(norm) {
+    const f = FRANCHISES.join("|");
+    const n = NATIONS.join("|");
+    if (new RegExp(` (${f}) (v|vs) (${f}) `).test(norm)) return "franchise";
+    if (new RegExp(` (${n}) (v|vs) (${n}) `).test(norm)) return "nation";
+    return null;
   }
 
   /**
-   * Scores title (x2), channel and description (first 500 chars).
-   * Returns { isCricket, score, matched }.
+   * Errs toward off: a missed cricket video costs one click, a false positive
+   * costs capture on a video that isn't cricket.
+   * Signals: definite terms (title or channel), ambiguous terms (title,
+   * description; channel only counts as half), fixtures, and "Test" with
+   * "Day N". Returns { isCricket, score, matched }.
    */
   function cricketScore({ title = "", channel = "", description = "" } = {}) {
-    const desc = String(description).slice(0, 500);
-    const strong = [...wordHits(title, STRONG).map((t) => ({ t, w: 2 })), ...wordHits(channel, STRONG).map((t) => ({ t, w: 2 })), ...wordHits(desc, STRONG).map((t) => ({ t, w: 1 }))];
-    const weak = [...wordHits(title, WEAK), ...wordHits(desc, WEAK)];
-    const score = strong.reduce((s, x) => s + x.w, 0) + Math.min(2, weak.length) * 0.5;
-    const matched = [...new Set([...strong.map((x) => x.t), ...weak])];
-    return { isCricket: strong.length > 0 && score >= 2, score, matched };
+    const t = normalize(title);
+    const c = normalize(channel);
+    const d = normalize(String(description).slice(0, 500));
+    const definite = [...hits(t, DEFINITE), ...hits(c, DEFINITE)];
+    const fx = fixture(t) || fixture(d);
+    const ambiguous = new Set([...hits(t, AMBIGUOUS), ...hits(d, AMBIGUOUS)]);
+    const channelAmbiguous = hits(c, AMBIGUOUS).filter((x) => !ambiguous.has(x));
+    let score = (definite.length || fx === "franchise" ? 2 : 0) + ambiguous.size + channelAmbiguous.length * 0.5;
+    if (fx === "nation") score += 1;
+    if (/ test /.test(t) && / day [1-5] /.test(t)) score += 1;
+    const matched = [...new Set([...definite, ...ambiguous, ...channelAmbiguous, ...(fx ? [`${fx} fixture`] : [])])];
+    return { isCricket: score >= 2, score, matched };
   }
 
   /**
@@ -67,7 +97,7 @@
    */
   function createReplayDetector({ now = () => Date.now(), seekMinSec = LIMITS.replaySeekMinSec, withinMs = LIMITS.replayPauseWithinMs } = {}) {
     let lastTime = null;
-    let backSeekAt = null;
+    let backSeek = null; // { at, from }
     return {
       /** Call on timeupdate with the playing position. */
       onTime(t) {
@@ -75,20 +105,30 @@
       },
       /** Call on seeking with the new target time. */
       onSeek(target) {
-        if (Number.isFinite(target) && lastTime !== null && lastTime - target >= seekMinSec) backSeekAt = now();
+        if (Number.isFinite(target) && lastTime !== null && lastTime - target >= seekMinSec) backSeek = { at: now(), from: lastTime };
         if (Number.isFinite(target)) lastTime = target;
       },
-      /** Call on pause; true at most once per back-seek. */
+      /**
+       * Call on pause. Returns null, or { from } (the position the viewer seeked
+       * back from) at most once per back-seek. Reviewing up to `from` covers the
+       * moment they went back to see, even if they paused before reaching it.
+       */
       onPause() {
-        const hit = backSeekAt !== null && now() - backSeekAt <= withinMs;
-        if (hit) backSeekAt = null;
+        const hit = backSeek !== null && now() - backSeek.at <= withinMs ? { from: backSeek.from } : null;
+        backSeek = null;
         return hit;
       },
       reset() {
         lastTime = null;
-        backSeekAt = null;
+        backSeek = null;
       },
     };
+  }
+
+  /** The review window for a trigger at `now`; a replay pause extends it to where the viewer came from. */
+  function reviewWindow(now, replayFrom = null) {
+    const t1 = Math.max(now, Number.isFinite(replayFrom) ? replayFrom : now);
+    return { t0: Math.max(0, t1 - LIMITS.reviewWindowSec), t1 };
   }
 
   // ---------------------------------------------------------------------------
@@ -124,16 +164,20 @@
     BRACKET_ORDER: "The bail-off frame must come after the last bail-on frame.",
     CUT_IN_BRACKET: "There’s a camera cut between the bail-on and bail-off frames, so they don’t show one continuous moment.",
     BRACKET_TOO_WIDE: "The bail-on and bail-off frames are too far apart to pin down the moment the wicket broke.",
-    GROUNDING_UNKNOWN: "Whether bat or body was grounded behind the crease at that moment hasn’t been confirmed.",
-    GROUNDING_NOT_VISIBLE: "The bat and feet can’t be seen clearly at the moment the wicket broke.",
+    NO_CREASE: "The popping crease hasn’t been located, so being in or out of ground can’t be judged.",
+    GROUNDING_UNKNOWN: "Whether bat or body was grounded behind the crease in the bail-on and bail-off frames hasn’t been confirmed.",
+    GROUNDING_NOT_VISIBLE: "The two frames either disagree about bat and feet or don’t show them clearly, so the moment can’t be settled.",
   });
 
   /**
-   * The verdict rule (SPEC 4.5). grounded is the viewer's answer:
-   * 'behind' | 'not-behind' | 'cant-see' | null.
+   * The verdict rule (SPEC 4.5). grounded is the viewer's answer about BOTH
+   * bracket frames: 'behind' (behind in both) | 'not-behind' (not behind in
+   * both) | 'cant-see' (they differ, or can't be seen) | null.
+   * hasCrease: the crease is located (detected or set by the viewer).
    */
-  function decideVerdict(bracketCheck, grounded) {
+  function decideVerdict(bracketCheck, grounded, { hasCrease = false } = {}) {
     const codes = [...bracketCheck.problems];
+    if (!hasCrease) codes.push("NO_CREASE");
     if (grounded === "cant-see") codes.push("GROUNDING_NOT_VISIBLE");
     else if (grounded !== "behind" && grounded !== "not-behind") codes.push("GROUNDING_UNKNOWN");
 
@@ -144,7 +188,7 @@
         codes: [],
         reasons: [
           `The wicket broke between two frames ${bracketCheck.gapMs} ms apart in the same shot.`,
-          out ? "At that moment neither bat nor body was grounded behind the popping crease." : "At that moment bat or body was grounded behind the popping crease.",
+          out ? "In both frames neither bat nor body was grounded behind the popping crease." : "In both frames bat or body was grounded behind the popping crease.",
         ],
         assumptions: ASSUMPTIONS.slice(),
       };
@@ -175,7 +219,7 @@
       crease: crease
         ? { line: { x1: normPoint(crease.line.x1, crease.width), y1: normPoint(crease.line.y1, crease.height), x2: normPoint(crease.line.x2, crease.width), y2: normPoint(crease.line.y2, crease.height) }, source: crease.source }
         : null,
-      grounded: { value: grounded || "unknown", source: grounded ? "viewer" : "none", hint: hint ? { value: hint.value, confidence: hint.confidence } : null },
+      grounded: { value: grounded || "unknown", source: grounded ? "viewer" : "none", frames: bracket ? [at(bracket.lastOn), at(bracket.firstOff)].filter(Boolean).map((f) => f.id) : [], hint: hint ? { value: hint.value, confidence: hint.confidence } : null },
       verdict: { call: verdict.call, reasons: verdict.reasons, assumptions: verdict.assumptions },
     };
   }
@@ -186,6 +230,7 @@
     cricketScore,
     decideCapture,
     createReplayDetector,
+    reviewWindow,
     validateBracket,
     decideVerdict,
     buildEvidencePacket,

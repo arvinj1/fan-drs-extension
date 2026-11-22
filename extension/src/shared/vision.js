@@ -51,6 +51,42 @@
     return sum / (r.w * r.h);
   }
 
+  /**
+   * Like meanAbsDiff, but with each frame's mean brightness inside the
+   * rectangle removed first, so exposure changes and flicker don't count.
+   */
+  function structuralDiff(a, b, rect) {
+    const r = clampRect(a, rect);
+    if (!r) return 0;
+    let sa = 0;
+    let sb = 0;
+    for (let y = r.y; y < r.y + r.h; y++) {
+      const row = y * a.width;
+      for (let x = r.x; x < r.x + r.w; x++) {
+        sa += a.data[row + x];
+        sb += b.data[row + x];
+      }
+    }
+    const n = r.w * r.h;
+    const shift = (sa - sb) / n;
+    let sum = 0;
+    for (let y = r.y; y < r.y + r.h; y++) {
+      const row = y * a.width;
+      for (let x = r.x; x < r.x + r.w; x++) sum += Math.abs(a.data[row + x] - b.data[row + x] - shift);
+    }
+    return sum / n;
+  }
+
+  /**
+   * A strip of the same size beside the bail region (left if there's room,
+   * else right): it sees camera motion but not the bails.
+   */
+  function referenceRegion(region, frame) {
+    const gap = Math.round(region.w * 0.3);
+    const x = region.x - gap - region.w >= 0 ? region.x - gap - region.w : region.x + region.w + gap;
+    return clampRect(frame, { x, y: region.y, w: region.w, h: region.h });
+  }
+
   function median(values) {
     if (values.length === 0) return 0;
     const s = Float64Array.from(values).sort();
@@ -170,11 +206,19 @@
    * Returns { ok: true, lastOn, firstOff, confidence } (frame indices) or
    * { ok: false, reason }.
    */
-  function detectBailOff(frames, region, { cuts = new Set(), k = 5, minAbs = 6, persistFrames = 2 } = {}) {
+  function detectBailOff(frames, region, { cuts = new Set(), k = 5, minAbs = 6, persistFrames = 2, localRatio = 2 } = {}) {
     if (!region) return { ok: false, reason: "NO_BAIL_REGION" };
     if (frames.length < 4) return { ok: false, reason: "TOO_FEW_FRAMES" };
+    const ref = referenceRegion(region, frames[0]);
+    // Local change: how much more the bail region changed than the reference
+    // strip. Brightness steps cancel in structuralDiff; camera motion moves
+    // both regions and cancels here.
+    const local = (a, b) => {
+      const d = structuralDiff(a, b, region);
+      return ref ? Math.max(0, d - localRatio * structuralDiff(a, b, ref)) : d;
+    };
     const diffs = [];
-    for (let i = 1; i < frames.length; i++) diffs.push(cuts.has(i) ? 0 : meanAbsDiff(frames[i - 1], frames[i], region));
+    for (let i = 1; i < frames.length; i++) diffs.push(cuts.has(i) ? 0 : local(frames[i - 1], frames[i]));
     const { median: m, sigma } = robustStats(diffs.filter((_, i) => !cuts.has(i + 1)));
     const threshold = Math.max(minAbs, m + k * Math.max(sigma, 0.5));
 
@@ -187,22 +231,25 @@
     // usually arrives a frame before the bails fly, so the last "on" frame is
     // the last one that still matches the baseline, not simply spike - 1.
     const baseIdx = Math.max(0, top.i - 3);
-    if ([...Array(top.i - baseIdx).keys()].some((j) => cuts.has(baseIdx + 1 + j))) return { ok: false, reason: "CUT_BEFORE_BAIL_CHANGE" };
+    for (let j = baseIdx + 1; j <= top.i - 1; j++) if (cuts.has(j)) return { ok: false, reason: "CUT_BEFORE_BAIL_CHANGE" };
     const base = frames[baseIdx];
     const after = frames.slice(top.i + 1, top.i + 1 + persistFrames);
     if (after.length < persistFrames) return { ok: false, reason: "BAIL_CHANGE_AT_EDGE" };
     for (let j = 0; j < after.length; j++) {
       if (cuts.has(top.i + 1 + j)) return { ok: false, reason: "CUT_AFTER_BAIL_CHANGE" };
-      if (meanAbsDiff(base, after[j], region) < top.d * 0.5) return { ok: false, reason: "BAIL_CHANGE_NOT_SUSTAINED" };
+      // Still different from the baseline by more than normal frame-to-frame
+      // change. (Not "half the spike": a glove arriving is a far bigger change
+      // than the bail itself, so that test would reject real stumpings.)
+      if (local(base, after[j]) <= threshold) return { ok: false, reason: "BAIL_CHANGE_NOT_SUSTAINED" };
     }
     // Likewise the first "off" frame is the first that already matches the
     // settled scene after the event (a glove frame shows neither state).
     const settled = after[after.length - 1];
     let firstOff = top.i;
-    while (firstOff < top.i + persistFrames && meanAbsDiff(frames[firstOff], settled, region) > threshold) firstOff++;
+    while (firstOff < top.i + persistFrames && local(frames[firstOff], settled) > threshold) firstOff++;
     let lastOn = baseIdx;
     for (let j = top.i - 1; j > baseIdx; j--) {
-      if (meanAbsDiff(base, frames[j], region) <= threshold) {
+      if (local(base, frames[j]) <= threshold) {
         lastOn = j;
         break;
       }
@@ -381,6 +428,8 @@
   const api = Object.freeze({
     toGray,
     meanAbsDiff,
+    structuralDiff,
+    referenceRegion,
     median,
     robustStats,
     detectCuts,

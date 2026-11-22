@@ -1,6 +1,6 @@
 {
   "name": "fan-drs-extension",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Fan DRS Review Chrome extension (MV3). No runtime dependencies.",
   "engines": {

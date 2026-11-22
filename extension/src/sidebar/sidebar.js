@@ -32,6 +32,8 @@
     ctx: null,
     /** The active review, or null. Replaced wholesale by each new review. */
     review: null,
+    /** Bumped by every new review and every reset; async work checks it after each await. */
+    reviewSeq: 0,
     pickingCrease: null, // null | [] | [{x, y}]
   };
 
@@ -162,6 +164,9 @@
   }
 
   async function runReview(req) {
+    const seq = ++state.reviewSeq;
+    const current = () => seq === state.reviewSeq;
+    state.review = null;
     state.pickingCrease = null;
     $("emptyView").hidden = true;
     $("reviewView").hidden = false;
@@ -173,7 +178,14 @@
     try {
       result = await request("GET_KEYFRAMES", { t0: req.t0, t1: req.t1, maxFrames: Review.LIMITS.reviewMaxFrames, includeImages: true }, "review");
     } catch (err) {
-      if (!quiet(err)) setStatus(err.code === "TIMEOUT" ? "The page didn’t answer in time. Try again." : "Couldn’t collect frames. Try again.");
+      if (current() && !quiet(err)) setStatus(err.code === "TIMEOUT" ? "The page didn’t answer in time. Try again." : "Couldn’t collect frames. Try again.");
+      return;
+    }
+    if (!current()) return;
+    if (Number.isInteger(req.generation) && result.generation !== req.generation) {
+      // The video changed between the request and the answer.
+      setVerdictText("—", "");
+      setStatus("The video changed before the review finished. Review again.");
       return;
     }
     if (result.frames.length === 0) {
@@ -186,22 +198,23 @@
     try {
       grays = await Promise.all(result.frames.map((f) => decodeGray(f.jpeg)));
     } catch {
-      setStatus("Couldn’t read the captured frames.");
+      if (current()) setStatus("Couldn’t read the captured frames.");
       return;
     }
+    if (!current()) return;
     // YouTube can switch quality mid-window. Detectors compare like with like,
     // so keep the frames that match the most recent size and say so.
     const last = grays[grays.length - 1];
     const all = result.frames.map((f, i) => ({ id: f.id, t: f.mediaTime, jpeg: f.jpeg, gray: grays[i] }));
     const frames = all.filter((f) => f.gray.width === last.width && f.gray.height === last.height);
     const dropped = all.length - frames.length;
-    const review = { req, frames, coverage: result.coverage, width: last.width, height: last.height };
+    const review = { req, video: result.video, frames, coverage: result.coverage, width: last.width, height: last.height };
     detect(review);
     review.selected = review.bracket ? review.bracket.lastOn : frames.length - 1;
     review.grounded = null;
     state.review = review;
     renderReview();
-    setStatus(`Analyzed ${frames.length} frames.${dropped ? ` ${dropped} earlier frames were skipped because the video quality changed.` : ""}`);
+    setStatus(`Analyzed ${frames.length} frames.${dropped ? ` ${dropped} frames were skipped because the video quality changed.` : ""}`);
   }
 
   /** Runs the detectors and stores their output (or abstention reasons) on the review. */
@@ -244,10 +257,9 @@
     const times = review.frames.map((f) => ({ id: f.id, t: f.t }));
     const b = review.bracket;
     const check = Review.validateBracket(times, b ? b.lastOn : null, b ? b.firstOff : null, review.cuts);
-    const verdict = Review.decideVerdict(check, review.grounded);
-    const ctx = state.ctx || {};
+    const verdict = Review.decideVerdict(check, review.grounded, { hasCrease: Boolean(review.crease) });
     const packet = Review.buildEvidencePacket({
-      video: { id: ctx.videoId, title: ctx.title, channel: ctx.channel },
+      video: review.video,
       window: { t0: review.req.t0, t1: review.req.t1 },
       trigger: review.req.trigger,
       capture: review.coverage,
@@ -332,7 +344,12 @@
     for (const input of document.querySelectorAll('input[name="grounded"]')) input.checked = input.value === r.grounded;
 
     const cls = verdict.call === "OUT" ? "out" : verdict.call === "NOT_OUT" ? "notout" : "";
-    setVerdictText(verdict.call.replace("_", " "), cls);
+    const label = verdict.call.replace("_", " ");
+    if (r.lastCall !== label) {
+      if (r.lastCall !== undefined) setStatus(`Finding: ${label}.`); // the one live announcement
+      r.lastCall = label;
+    }
+    setVerdictText(label, cls);
     setList("reasons", verdict.reasons);
     setList("assumptions", verdict.assumptions);
     $("packetFallback").hidden = true;
@@ -362,7 +379,6 @@
       return btn;
     });
     strip.replaceChildren(...items);
-    strip.setAttribute("aria-activedescendant", "");
     items[r.selected]?.scrollIntoView({ block: "nearest", inline: "center" });
   }
 
@@ -410,6 +426,7 @@
   }
 
   function clearReview(statusText) {
+    state.reviewSeq++;
     if (state.rpc) state.rpc.cancelAll("CANCELLED");
     state.review = null;
     state.pickingCrease = null;
@@ -439,6 +456,7 @@
     if (which === "lastOn" && (next.firstOff === null || next.firstOff <= r.selected)) next.firstOff = Math.min(r.selected + 1, r.frames.length - 1);
     if (which === "firstOff" && (next.lastOn === null || next.lastOn >= r.selected)) next.lastOn = Math.max(r.selected - 1, 0);
     r.bracket = next;
+    r.grounded = null; // the answer was about the old frames
     updateHint(r);
     renderReview();
   }
@@ -470,6 +488,7 @@
         setStatus("Those points are too close together. Set the crease again.");
       } else {
         r.crease = { line: extendLine(a, b, r.width, r.height), source: "viewer", confidence: null };
+        r.grounded = null; // "behind the crease" now means a different line
         updateHint(r);
         setStatus("Crease set.");
       }
@@ -506,6 +525,7 @@
     if (!r) return;
     r.crease = null;
     r.creaseReason = null;
+    r.grounded = null;
     updateHint(r);
     renderReview();
   });
@@ -533,13 +553,15 @@
     }
   });
 
-  function reviewFromCard() {
-    const t1 = state.ctx?.currentTime;
-    if (!Number.isFinite(t1)) {
+  async function reviewFromCard() {
+    await refreshContext(); // fresh playback time, not the last 500 ms tick
+    const ctx = state.ctx;
+    if (!ctx || !Number.isFinite(ctx.currentTime)) {
       setStatus("Play the video first.");
       return;
     }
-    runReview({ t0: Math.max(0, t1 - Review.LIMITS.reviewWindowSec), t1, trigger: "card" });
+    if (!ctx.capture.on) await setCapture("video", "on");
+    runReview({ ...Review.reviewWindow(ctx.currentTime), trigger: "card", generation: state.ctx.capture.generation });
   }
   $("btnReviewNow").addEventListener("click", reviewFromCard);
   $("btnReviewAgain").addEventListener("click", reviewFromCard);

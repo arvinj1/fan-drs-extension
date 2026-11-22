@@ -48,9 +48,12 @@
   const prefs = {
     /** videoId -> "on" | "off", for this tab's lifetime. */
     videoOverrides: new Map(),
-    /** channel name -> "on" | "off", persisted. */
-    channelPrefs: {},
+    /** channel name -> "on" | "off", persisted. Null prototype: names like "constructor" are just names. */
+    channelPrefs: Object.create(null),
   };
+
+  const channelPref = (name) => (name && Object.hasOwn(prefs.channelPrefs, name) ? prefs.channelPrefs[name] : null);
+  const toPrefs = (v) => Object.assign(Object.create(null), isPlainPrefs(v) ? v : {});
 
   // ---------------------------------------------------------------------------
   // Page reads
@@ -60,7 +63,8 @@
   const getVideoId = () => (isWatchPage() ? new URL(location.href).searchParams.get("v") : null);
   const getVideoEl = () => document.querySelector("video.html5-main-video");
   const isAdShowing = () => Boolean(document.querySelector("#movie_player.ad-showing"));
-  const text = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
+  // textContent, not innerText: this runs every tick and innerText forces layout.
+  const text = (sel) => document.querySelector(sel)?.textContent?.replace(/\s+/g, " ").trim() || "";
 
   function pageMeta() {
     return {
@@ -76,7 +80,7 @@
     const videoId = getVideoId();
     const decision = Review.decideCapture({
       videoOverride: videoId ? prefs.videoOverrides.get(videoId) || null : null,
-      channelPref: meta.channel ? prefs.channelPrefs[meta.channel] || null : null,
+      channelPref: channelPref(meta.channel),
       cricket: cricket.isCricket,
     });
     return { ...decision, cricket, meta };
@@ -99,7 +103,7 @@
       capture: {
         on: policy.on,
         reason: policy.reason,
-        channelPref: prefs.channelPrefs[policy.meta.channel] || null,
+        channelPref: channelPref(policy.meta.channel),
         running: session.running,
         generation: session.generation,
         bufferedFrames: ring.size,
@@ -146,7 +150,9 @@
   const onTimeUpdate = (ev) => replay.onTime(ev.target.currentTime);
   const onSeeking = (ev) => replay.onSeek(ev.target.currentTime);
   const onPause = () => {
-    if (session.running && replay.onPause()) openReview("replay-pause");
+    const hit = replay.onPause();
+    // Never replace a review the viewer is looking at; they can press Review again.
+    if (hit && session.running && !ui.open) openReview("replay-pause", hit.from);
   };
 
   function onVideoEmptied() {
@@ -211,7 +217,7 @@
   function loadPrefs() {
     chrome.storage.local.get("channelPrefs").then(
       (data) => {
-        prefs.channelPrefs = isPlainPrefs(data?.channelPrefs) ? data.channelPrefs : {};
+        prefs.channelPrefs = toPrefs(data?.channelPrefs);
         onTick();
       },
       () => {}
@@ -222,7 +228,7 @@
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.channelPrefs) {
-      prefs.channelPrefs = isPlainPrefs(changes.channelPrefs.newValue) ? changes.channelPrefs.newValue : {};
+      prefs.channelPrefs = toPrefs(changes.channelPrefs.newValue);
       onTick();
     }
   });
@@ -235,11 +241,11 @@
       if (value === null) prefs.videoOverrides.delete(videoId);
       else prefs.videoOverrides.set(videoId, value);
     } else if (scope === "channel" && channel) {
-      const next = { ...prefs.channelPrefs };
+      const next = toPrefs(prefs.channelPrefs);
       if (value === null) delete next[channel];
       else next[channel] = value;
       prefs.channelPrefs = next;
-      await chrome.storage.local.set({ channelPrefs: next });
+      await chrome.storage.local.set({ channelPrefs: { ...next } });
     }
     onTick();
   }
@@ -265,6 +271,10 @@
     reconcileCapture();
     const cap = includeImages ? Math.min(maxFrames, Review.LIMITS.reviewMaxFrames) : maxFrames;
     const result = Core.selectWindow(ring, session.generation, { t0, t1 }, cap);
+    // Identity of the video these frames came from, so the card never labels
+    // one video's frames with another's metadata.
+    const { title, channel } = pageMeta();
+    result.video = { id: session.videoId, title, channel };
     if (includeImages) {
       const byId = new Map(ring.framesFor(session.generation).map((f) => [f.id, f.jpeg]));
       result.frames = result.frames.map((f) => ({ ...f, jpeg: byId.get(f.id) }));
@@ -328,14 +338,17 @@
   // Review
   // ---------------------------------------------------------------------------
 
-  /** Opens the card on the 12 s ending now. trigger: chip | shortcut | replay-pause. */
-  function openReview(trigger) {
+  /**
+   * Opens the card on a 12 s window ending now, or, for a replay pause, ending
+   * where the viewer seeked back from. trigger: chip | shortcut | replay-pause.
+   */
+  function openReview(trigger, replayFrom = null) {
     const video = getVideoEl();
     const videoId = getVideoId();
     if (!video || !videoId) return;
     if (!capturePolicy().on) setCapture("video", "on");
-    const t1 = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-    const review = { id: ++ui.reviewSeq, t0: Math.max(0, t1 - Review.LIMITS.reviewWindowSec), t1, trigger, generation: session.generation };
+    const now = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    const review = { id: ++ui.reviewSeq, ...Review.reviewWindow(now, replayFrom), trigger, generation: session.generation };
     setOpen(true);
     if (ui.port) emit("REVIEW_REQUESTED", review);
     else ui.pendingReview = review;
@@ -443,6 +456,8 @@
 
     host.style.transform = open ? "translateX(0)" : "translateX(100%)";
     host.style.visibility = open ? "visible" : "hidden";
+    // A closed panel can't hold focus or be reached by keyboard or screen reader.
+    host.inert = !open;
     host.style.transitionDelay = open ? "0s" : "0s, 180ms";
     handle.style.display = !open && ui.everOpened && getVideoId() ? "block" : "none";
     if (btn) btn.setAttribute("aria-expanded", String(open));
@@ -451,14 +466,8 @@
       pushContextIfChanged();
       if (!wasOpen) ui.iframe?.focus();
     } else if (wasOpen && restoreFocus) {
-      // The close usually starts from a click inside the iframe, which can keep
-      // focus on the panel host. Blur it, move focus, and check again next frame.
-      const target = btn && btn.isConnected ? btn : handle;
-      ui.iframe?.blur();
-      target.focus();
-      requestAnimationFrame(() => {
-        if (!ui.open && document.activeElement === host) target.focus();
-      });
+      // The host is inert now, so focus can't stay inside the panel.
+      (btn && btn.isConnected ? btn : handle).focus();
     }
   }
 

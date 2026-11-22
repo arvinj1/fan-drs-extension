@@ -61,18 +61,18 @@
       </section>
 
       <fieldset class="step" id="grounding">
-        <legend>At that moment, was bat or body grounded behind the crease?</legend>
+        <legend>In the bail-on and bail-off frames, was bat or body grounded behind the crease?</legend>
         <p id="hintText" class="detail"></p>
         <div class="row choices">
-          <label><input type="radio" name="grounded" value="behind" /> Behind</label>
-          <label><input type="radio" name="grounded" value="not-behind" /> Not behind</label>
-          <label><input type="radio" name="grounded" value="cant-see" /> Can’t see</label>
+          <label><input type="radio" name="grounded" value="behind" /> Behind in both</label>
+          <label><input type="radio" name="grounded" value="not-behind" /> Not behind in both</label>
+          <label><input type="radio" name="grounded" value="cant-see" /> They differ, or can’t see</label>
         </div>
       </fieldset>
 
       <section class="finding" aria-labelledby="hFinding">
         <h2 id="hFinding" class="visually-hidden">Finding</h2>
-        <p id="verdict" class="verdict" aria-live="polite">—</p>
+        <p id="verdict" class="verdict">—</p>
         <ul id="reasons" class="reasons"></ul>
         <details>
           <summary>Assumptions</summary>
@@ -88,7 +88,7 @@
   </main>
 
   <p id="statusText" class="status" role="status" aria-live="polite"></p>
-  <footer>v0.3.0 · Runs on your device. Frames stay in this tab and are never uploaded.</footer>
+  <footer>v0.3.1 · Runs on your device. Frames stay in this tab and are never uploaded.</footer>
 
   <script src="../shared/core.js"></script>
   <script src="../shared/vision.js"></script>

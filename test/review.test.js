@@ -13,13 +13,14 @@ const R = require("../extension/src/shared/review.js");
 const W = 160;
 const H = 90;
 
-function scene({ bail = true, footX = 60, glove = false, noise = 0, seed = 1, bright = 0, creaseX = 80, creaseTilt = 0, barW = 2 } = {}) {
+function scene({ bail = true, footX = 60, glove = false, noise = 0, seed = 1, bright = 0, creaseX = 80, creaseTilt = 0, barW = 2, dx = 0 } = {}) {
   const data = new Uint8ClampedArray(W * H);
   let s = seed;
   const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5) * 2;
   for (let i = 0; i < data.length; i++) data[i] = 90 + bright + noise * rnd();
-  const rect = (x, y, w, h, v) => {
-    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (xx >= 0 && xx < W && yy >= 0 && yy < H) data[yy * W + xx] = v;
+  const rect = (x0, y, w, h, v) => {
+    const x = x0 + dx; // camera shift moves everything drawn
+    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (xx >= 0 && xx < W && yy >= 0 && yy < H) data[yy * W + xx] = v + bright; // exposure lifts everything
   };
   // crease: bright 2 px line from (creaseX, 28) to (creaseX + creaseTilt, 89)
   for (let y = 28; y < H; y++) {
@@ -121,6 +122,32 @@ test("a glove arriving the frame before the bails fly widens the bracket instead
   assert.equal(r.firstOff, 9);
 });
 
+test("brightness changes and camera jerks are not mistaken for a bail coming off", () => {
+  const base = clip(16, 99, { noise: 4 });
+  const region = V.bailRegion(V.detectStumps(base[0]), base[0]);
+  const brighter = base.map((f, i) => (i >= 9 ? scene({ noise: 4, seed: i + 1, bright: 15 }) : f));
+  assert.equal(V.detectBailOff(brighter, region).ok, false, "exposure step");
+  const jerk = base.map((f, i) => (i >= 9 ? scene({ noise: 4, seed: i + 1, dx: 3 }) : f));
+  assert.equal(V.detectBailOff(jerk, region).ok, false, "3 px camera jerk");
+  const flicker = base.map((f, i) => scene({ noise: 4, seed: i + 1, bright: i % 2 ? 12 : 0 }));
+  assert.equal(V.detectBailOff(flicker, region).ok, false, "flicker");
+});
+
+test("a real bail-off is still found when a camera jerk follows later", () => {
+  const frames = Array.from({ length: 16 }, (_, i) => scene({ noise: 4, seed: i + 1, bail: i < 5, dx: i >= 11 ? 3 : 0 }));
+  const region = V.bailRegion(V.detectStumps(frames[0]), frames[0]);
+  const r = V.detectBailOff(frames, region);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual([r.lastOn, r.firstOff], [4, 5]);
+});
+
+test("structuralDiff ignores a uniform brightness change", () => {
+  const a = scene();
+  const b = scene({ bright: 10 }); // stays below 255, so nothing clips
+  assert.ok(V.structuralDiff(a, b, { x: 0, y: 0, w: W, h: H }) < 1e-9);
+  assert.ok(V.meanAbsDiff(a, b) >= 9);
+});
+
 test("detectBailOff abstains with no change, at the clip edge, or across a cut", () => {
   const still = clip(12, 99, { noise: 4 });
   const region = V.bailRegion(V.detectStumps(still[0]), still[0]);
@@ -172,14 +199,40 @@ test("groundingHint suggests a side, capped below the decision threshold", () =>
 // Review policy
 // ---------------------------------------------------------------------------
 
-test("cricketScore recognises cricket and stays quiet otherwise", () => {
-  assert.equal(R.cricketScore({ title: "Best Fails Of DRS in Cricket History", channel: "Cricbuzz Cricket" }).isCricket, true);
-  assert.equal(R.cricketScore({ title: "Dhoni lightning stumping", channel: "Fan clips" }).isCricket, true);
-  assert.equal(R.cricketScore({ title: "Unit test tutorial for beginners", channel: "CodeAcademy" }).isCricket, false);
-  assert.equal(R.cricketScore({ title: "Lofi beats to study to" }).isCricket, false);
+const CRICKET_CASES = [
+  // [title, channel, expected]
+  ["Best Fails Of DRS in Cricket History", "Cricbuzz Cricket", true],
+  ["Dhoni lightning stumping", "Fan clips", true],
+  ["Ind v Aus | 2nd Test | Day 3", "", true],
+  ["#IPL2025 final", "", true],
+  ["IPL2025 Final Highlights", "", true],
+  ["KKR vs MI", "", true],
+  ["Ashes 2023 day 1: wicket after wicket", "", true],
+  ["Run out compilation | cricket", "", true],
+  ["Unit test tutorial for beginners", "CodeAcademy", false],
+  ["Test drive: the new EV", "", false],
+  ["Over the top", "", false],
+  ["Lofi beats to study to", "", false],
+  ["Cricket wireless phone review", "Cricket Wireless", false],
+  ["We run out of time", "", false],
+  ["Ashes of Creation gameplay", "", false],
+  ["DRS for Formula 1 explained", "", false],
+  ["ICC profile color management", "", false],
+  ["PSL 5 review", "", false],
+  ["Jiminy Cricket song", "", false],
+  ["Sticky Wicket brewery tour", "", false],
+  ["ODI", "", false],
+  ["India vs Australia football friendly", "", false],
+  ["", "", false],
+];
+
+test("cricketScore errs toward off on ambiguous titles", () => {
+  for (const [title, channel, expected] of CRICKET_CASES) {
+    assert.equal(R.cricketScore({ title, channel }).isCricket, expected, `${JSON.stringify(title)} / ${JSON.stringify(channel)}`);
+  }
   assert.equal(R.cricketScore({ title: "Highlights", description: "Full highlights of the 2nd ODI between India and Australia" }).isCricket, false, "one description hit is not enough");
   assert.equal(R.cricketScore({ title: "Highlights", description: "2nd ODI: India v Australia cricket highlights" }).isCricket, true);
-  assert.equal(R.cricketScore({}).isCricket, false);
+  assert.equal(R.cricketScore({ title: "Highlights", channel: "Cricket Wireless" }).isCricket, false, "an ambiguous channel name alone is not enough");
 });
 
 test("decideCapture follows video, then channel, then detection", () => {
@@ -192,25 +245,32 @@ test("decideCapture follows video, then channel, then detection", () => {
   assert.deepEqual(R.decideCapture({ cricket: true, channelPref: "maybe" }), { on: true, reason: "CRICKET" }, "unknown values are ignored");
 });
 
-test("replay detector fires once for a pause shortly after a back-seek", () => {
+test("replay detector reports where the viewer seeked back from, once", () => {
   let clock = 0;
   const d = R.createReplayDetector({ now: () => clock });
   d.onTime(30);
-  assert.equal(d.onPause(), false, "plain pause");
+  assert.equal(d.onPause(), null, "plain pause");
   d.onSeek(26); // back 4 s
   clock = 3000;
-  assert.equal(d.onPause(), true);
-  assert.equal(d.onPause(), false, "only once");
+  assert.deepEqual(d.onPause(), { from: 30 });
+  assert.equal(d.onPause(), null, "only once");
   d.onTime(28);
   d.onSeek(27.5); // back 0.5 s: too small
-  assert.equal(d.onPause(), false);
+  assert.equal(d.onPause(), null);
   d.onTime(40);
   d.onSeek(35);
   clock = 30000; // too late
-  assert.equal(d.onPause(), false);
+  assert.equal(d.onPause(), null);
   d.onTime(10);
   d.onSeek(20); // forward
-  assert.equal(d.onPause(), false);
+  assert.equal(d.onPause(), null);
+});
+
+test("reviewWindow extends a replay pause to where the viewer came from", () => {
+  assert.deepEqual(R.reviewWindow(4.3, 9), { t0: 0, t1: 9 }, "paused before the incident: still covered");
+  assert.deepEqual(R.reviewWindow(30), { t0: 18, t1: 30 });
+  assert.deepEqual(R.reviewWindow(30, 20), { t0: 18, t1: 30 }, "never shrinks below the pause time");
+  assert.deepEqual(R.reviewWindow(5), { t0: 0, t1: 5 });
 });
 
 const frames = (times) => times.map((t, i) => ({ id: i + 1, t }));
@@ -225,17 +285,19 @@ test("validateBracket checks presence, order, cuts and width", () => {
   assert.deepEqual(R.validateBracket(f, 0, 9).problems, ["NO_BRACKET"]);
 });
 
-test("decideVerdict needs a valid bracket and a viewer's grounding answer", () => {
+test("decideVerdict needs a valid bracket, a crease, and the viewer's answer for both frames", () => {
   const ok = R.validateBracket(frames([1, 1.25]), 0, 1);
-  assert.equal(R.decideVerdict(ok, "not-behind").call, "OUT");
-  assert.equal(R.decideVerdict(ok, "behind").call, "NOT_OUT");
-  const unknown = R.decideVerdict(ok, null);
+  const withCrease = { hasCrease: true };
+  assert.equal(R.decideVerdict(ok, "not-behind", withCrease).call, "OUT");
+  assert.equal(R.decideVerdict(ok, "behind", withCrease).call, "NOT_OUT");
+  assert.deepEqual(R.decideVerdict(ok, "not-behind").codes, ["NO_CREASE"], "no call without a crease");
+  const unknown = R.decideVerdict(ok, null, withCrease);
   assert.equal(unknown.call, "INCONCLUSIVE");
   assert.deepEqual(unknown.codes, ["GROUNDING_UNKNOWN"]);
-  assert.deepEqual(R.decideVerdict(ok, "cant-see").codes, ["GROUNDING_NOT_VISIBLE"]);
+  assert.deepEqual(R.decideVerdict(ok, "cant-see", withCrease).codes, ["GROUNDING_NOT_VISIBLE"]);
   const wide = R.validateBracket(frames([1, 2]), 0, 1);
-  assert.deepEqual(R.decideVerdict(wide, "not-behind").codes, ["BRACKET_TOO_WIDE"], "a clear foot can't rescue a vague moment");
-  for (const v of [R.decideVerdict(ok, "behind"), unknown]) {
+  assert.deepEqual(R.decideVerdict(wide, "not-behind", withCrease).codes, ["BRACKET_TOO_WIDE"], "a clear foot can't rescue a vague moment");
+  for (const v of [R.decideVerdict(ok, "behind", withCrease), unknown]) {
     assert.equal(v.assumptions.length, 3);
     assert.ok(v.reasons.every((r) => typeof r === "string" && r.length > 10));
   }
@@ -244,7 +306,7 @@ test("decideVerdict needs a valid bracket and a viewer's grounding answer", () =
 test("buildEvidencePacket normalizes geometry and never carries images", () => {
   const f = [{ id: 7, t: 64.5104, jpeg: "data:image/jpeg;base64,AAAA" }, { id: 8, t: 64.7611 }];
   const check = R.validateBracket(f, 0, 1);
-  const verdict = R.decideVerdict(check, "behind");
+  const verdict = R.decideVerdict(check, "behind", { hasCrease: true });
   const p = R.buildEvidencePacket({
     video: { id: "abc", title: "T", channel: "C" },
     window: { t0: 52.7611, t1: 64.7611 },
@@ -264,10 +326,10 @@ test("buildEvidencePacket normalizes geometry and never carries images", () => {
   assert.deepEqual(p.bracket.lastOn, { id: 7, t: 64.51 });
   assert.equal(p.bracket.gapMs, 251);
   assert.deepEqual(p.crease.line, { x1: 0.5, y1: 0, x2: 0.5, y2: 1 });
-  assert.deepEqual(p.grounded, { value: "behind", source: "viewer", hint: { value: "behind", confidence: 0.5 } });
+  assert.deepEqual(p.grounded, { value: "behind", source: "viewer", frames: [7, 8], hint: { value: "behind", confidence: 0.5 } });
   assert.equal(p.verdict.call, "NOT_OUT");
   assert.ok(!JSON.stringify(p).includes("base64"), "no image data");
   const empty = R.buildEvidencePacket({ video: { id: "x" }, window: { t0: 0, t1: 1 }, trigger: "shortcut", capture: { coverage: 0, gaps: [] }, frames: [], bracket: null, bracketCheck: R.validateBracket([], null, null), crease: null, grounded: null, hint: null, verdict: R.decideVerdict(R.validateBracket([], null, null), null) });
   assert.equal(empty.bracket, null);
-  assert.deepEqual(empty.grounded, { value: "unknown", source: "none", hint: null });
+  assert.deepEqual(empty.grounded, { value: "unknown", source: "none", frames: [], hint: null });
 });

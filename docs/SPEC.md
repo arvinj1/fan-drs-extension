@@ -1,6 +1,6 @@
 # Fan DRS Review · Review foundation spec (v3)
 
-Status: implemented on branch `review-foundation` (A1 + this spec). Supersedes the slice B/C sections of `fan-drs-modernization-spec.v2.md`. Slice A1 stays as specified there.
+Status: implemented on branch `review-foundation` (A1 + this spec); revised in 0.3.1 after independent review (see `docs/receipts/BC-review.md`). Supersedes the slice B/C sections of `fan-drs-modernization-spec.v2.md`. Slice A1 stays as specified there.
 
 ## 1. The problem
 
@@ -12,7 +12,7 @@ The first live test of 0.2.0 (Chrome on macOS, Cricbuzz "Best Fails of DRS", 202
 
 | Part | What it does | Why |
 |---|---|---|
-| **Always ready** | Capture starts by itself on cricket videos, with a one-click override on any video. | A question can only be answered from footage that was already captured. |
+| **Always ready** | Capture starts by itself on videos that are clearly cricket, with a one-click override on any video. | A question can only be answered from footage that was already captured. |
 | **One action to review** | Press **Review** (chip, `Alt+Shift+R`, or seek back and pause). The card opens already analyzed around that moment. | Replaying the moment is the natural gesture; the tool follows it. |
 | **Evidence, then a verdict** | Detectors propose the bail-off interval and crease, and suggest grounding. A verdict appears only when the interval is clear and the viewer has confirmed grounding with one tap; otherwise Inconclusive with the missing piece named. | A call that is rarely wrong is worth more than a call that is always present. |
 
@@ -39,7 +39,10 @@ Capture runs on a `/watch` page when the decision is **on**:
 | 3 | Title, channel or description looks like cricket | on |
 | 4 | Otherwise | off |
 
-Cricket detection is a keyword score over title, channel and the first 500 characters of the description (for example *cricket, wicket, stumping, stumped, DRS, LBW, Test, ODI, T20, IPL, BBL, PSL, Ashes, run out*). Title matches count more than description matches. Generic words alone (*Test*, *ODI*) need a second signal. It errs toward off: a missed cricket video costs one click, while a false positive costs CPU on a non-cricket video.
+Cricket detection scores the title, channel and the first 500 characters of the description, and errs toward off: a missed cricket video costs one click, while a false positive costs capture on a video that isn't cricket.
+- **Definite** terms only mean cricket (*stumping, stumped, LBW, IPL, BBL, T20, wicketkeeper, third umpire, Test match, Cricbuzz, ESPNcricinfo, BCCI*). One in the title or channel is enough, and so is an IPL franchise fixture (*KKR vs MI*).
+- **Ambiguous** terms also mean other things (*cricket* the phone carrier, *Ashes of Creation*, *DRS* in F1, *ICC* colour profiles, *PSL* the console, *run out* of time, *ODI*). Two distinct signals are needed. A national fixture (*Ind v Aus*) and *Test* with *Day N* each count as one. An ambiguous word only in the channel name counts as half.
+- Words and digits are split, so *#IPL2025* matches *IPL*. The cases are a table in `test/review.test.js`.
 
 Limits are unchanged from A1: 90 frames, 8 MiB, ads never captured, no network. Frames are now 480 px wide, up from 320, to give the detectors more pixels. Measured in the smoke test, the ring stays under the byte cap.
 
@@ -49,18 +52,19 @@ Channel preferences live in `chrome.storage.local` under `channelPrefs` as `{ "<
 
 - Clicking the chip (when capture is off, the chip turns it on first and says so).
 - `Alt+Shift+R` (a Chrome extension command; can be changed in `chrome://extensions/shortcuts`).
-- **Replay pause:** a pause within 15 s after a backward seek of at least 2 s while capture is on. Ordinary pauses don't open anything.
+- **Replay pause:** a pause within 15 s after a backward seek of at least 2 s while capture is on and the card is closed. Ordinary pauses don't open anything, and the gesture never replaces a review the viewer is looking at.
+- **Review again** in the card (trigger `card`), which turns capture on if needed.
 
-The review window is the 12 s ending at the playback time when review was triggered. The card states that window and never updates it under a finished result. Reviewing again replaces it.
+The review window is the 12 s ending at the playback time when review was triggered. For a replay pause it ends at the later of the pause time and the position the viewer seeked back from, so pausing just before the incident still covers it. The card states that window and never updates it under a finished result. Reviewing again replaces it.
 
 ### 4.3 The card
 
 One screen, no tabs:
 
 - **Header:** capture state with the override toggle, a channel "remember" option, close.
-- **Strip:** thumbnails of the window's frames (up to 48), keyboard and pointer selectable. The last-bail-on and first-bail-off frames are marked; gaps are drawn.
+- **Strip:** thumbnails of the window's frames (up to 48), keyboard and pointer selectable. The last-bail-on and first-bail-off frames are marked, and so are frames after a camera cut. (Capture gaps are reported in the packet, not drawn.)
 - **Stage:** the selected frame enlarged, with the crease line overlaid when known. Click two points to set the crease.
-- **Grounding question:** Behind / Not behind / Can't see, preset from the detector's suggestion when it has one.
+- **Grounding question:** about both bracket frames: *Behind in both* / *Not behind in both* / *They differ, or can't see*. The detector's suggestion is shown as text and never preselected. Changing the bracket or the crease clears the answer, because it referred to other frames or another line.
 - **Finding:** the call, reasons and assumptions. **Copy evidence** and **Review again**.
 
 ### 4.4 Detectors
@@ -71,19 +75,20 @@ All detectors are pure functions over grayscale pixel arrays (`{ width, height, 
 |---|---|---|
 | **Shot cut** | Whole-frame mean absolute difference against a robust baseline (median + k·MAD). | n/a; marks cut indices |
 | **Stumps ROI** | Column-wise vertical edge energy; three near-equal-spaced strong columns. | Fewer than three columns, or spacing inconsistent |
-| **Bail-off** | Per-pair change inside the region just above the stumps; the largest spike above median + k·MAD, not on a cut, followed by sustained change. Ported from phase1 `bail_detection.js` (frame-diff, MAD spike, cut rejection). | No spike, spike on a cut, or the two largest spikes are close in score |
-| **Crease** | Strongest straight edge line through the stumps' foot region (gradient-weighted line search over angles −80°…80° from vertical, which covers side-on and behind views). | Peak not clearly above the runner-up |
-| **Grounding hint** | Foreground mass (difference from the turf colour model, an idea from phase1 `foot_detection.js`) on each side of the crease line, low in the frame near the line. | Always reported as a *hint*; never decides the call alone |
+| **Bail-off** | Local change in the region just above the stumps: brightness-normalised difference, minus twice the change in a same-size reference strip beside the stumps (so exposure steps, flicker and camera jerks cancel). The largest spike above median + k·MAD, not on a cut, that stays different from a baseline a few frames earlier. Ported from phase1 `bail_detection.js` (frame-diff, MAD spike, cut rejection). | No spike, a spike on a cut, a change that returns to baseline (a passing glove), or two similar spikes. Known gap: a glove that stays over the bails can't be told from bails coming off; the viewer sees both frames. |
+| **Crease** | Strongest straight bright line in the whole frame, excluding the stumps, over angles −80°…80° from vertical. That covers side-on views; an end-on view's near-horizontal crease isn't searched. | Peak not clearly above the runner-up. Scoreboards and return creases can win; the viewer can set the line. |
+| **Grounding hint** | Non-turf mass (pixels far from the grayscale median of the lower frame, an idea from phase1 `foot_detection.js`) on each side of the crease line, low in the frame near the line. | Always a *hint*, capped at 0.6; never preselected, never decides the call |
 
 ### 4.5 Verdict rule
 
 ```
 bracket   = last frame with bail on, first frame with bail off
 valid     = both frames exist, same shot (no cut between), gap ≤ 400 ms
-grounded  = the viewer's answer (the hint only preselects it; it never decides alone)
+crease    = located (detected or set by the viewer)
+grounded  = the viewer's answer about BOTH bracket frames (the hint never decides)
 
-OUT          valid ∧ grounded = not-behind
-NOT OUT      valid ∧ grounded = behind
+OUT          valid ∧ crease ∧ grounded = not behind in both
+NOT OUT      valid ∧ crease ∧ grounded = behind in both
 INCONCLUSIVE otherwise, with every failing condition listed
 ```
 
@@ -101,12 +106,12 @@ Assumptions are always listed: legal delivery, the wicket was put down by the ke
   "frames": [{ "id": 12, "t": 64.51 }],
   "bracket": { "lastOn": { "id": 30, "t": 71.02 }, "firstOff": { "id": 31, "t": 71.27 }, "gapMs": 250, "sameShot": true, "source": "detector", "confidence": 0.86 },
   "crease": { "line": { "x1": 0.41, "y1": 0.55, "x2": 0.47, "y2": 0.98 }, "source": "viewer" },
-  "grounded": { "value": "unknown", "source": "none", "hint": { "value": "behind", "confidence": 0.42 } },
+  "grounded": { "value": "unknown", "source": "none", "frames": [30, 31], "hint": { "value": "behind", "confidence": 0.42 } },
   "verdict": { "call": "INCONCLUSIVE", "reasons": ["…"], "assumptions": ["…"] }
 }
 ```
 
-Coordinates are normalized to the frame (0–1). Images are never included. The packet is produced only on Review and only leaves the tab when the viewer presses Copy.
+Coordinates are normalized to the frame (0–1). `grounded.frames` lists the frame IDs the answer covers. `video` is the identity of the video the frames came from, captured with the frames. Images are never included. The packet is produced only on Review and only leaves the tab when the viewer presses Copy.
 
 ## 6. Out of scope
 
